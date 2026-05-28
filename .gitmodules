@@ -1,0 +1,6 @@
+[submodule "sub/PaddleNLP"]
+	path = sub/PaddleNLP
+	url = git@github.com:PaddlePaddle/PaddleNLP.git
+[submodule "sub/Paddle"]
+	path = sub/Paddle
+	url = git@github.com:PaddlePaddle/Paddle.git
