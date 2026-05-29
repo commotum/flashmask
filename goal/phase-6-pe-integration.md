@@ -27,6 +27,9 @@ template path until the standalone FlashMask SM90 proof has passed on Hopper.
 Phase 5 completion evidence is recorded in
 `/home/jake/Developer/flashmask/goal/phase-5-completion-audit.md`.
 
+Phase 6 completion evidence is recorded in
+`/home/jake/Developer/flashmask/goal/phase-6-completion-audit.md`.
+
 The standalone package now exposes one public routed API:
 
 ```text
