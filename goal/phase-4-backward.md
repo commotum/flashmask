@@ -14,15 +14,34 @@ scope, tests, and exit criteria.
 Implement backward for the current SM86/SM8x sparse kernel path so PE can train
 with FlashMask on the available local backend.
 
-This phase makes the forward kernels from Phase 3 usable for training. The
-backward path must preserve the same interval-mask semantics and must not route
-through dense masked attention as a hidden fallback.
+This phase makes the forward kernels completed in Phase 3 usable for training.
+Phase 3 completion evidence is recorded in
+`/home/jake/Developer/flashmask/goal/phase-3-completion-audit.md`. The backward
+path must preserve the same interval-mask semantics and must not route through
+dense masked attention as a hidden fallback.
 
 SM90/Hopper backward work in this phase is a template/scaffold only: keep the
 source references, build hooks, metadata fields, fail-closed architecture gates,
 and hard-gated validation commands ready for later H100/H200 access. SM90
 runtime gradient parity and profiler proof are deferred and are not current
 Phase 4 exit criteria.
+
+## Phase 3 Handoff
+
+The locally proven Phase 3 runtime path is:
+
+```text
+backend: fa2-compatible / sm8x_sparse_fa2_compatible
+device: SM86, compute capability 8.6
+dtype: fp16, bf16
+head_dim dispatch groups: 96, 128
+mask: PE non-causal state-autoregressive bound_num=2 interval masks
+backward: not implemented, fail-closed
+```
+
+Phase 4 should implement backward for this proven SM86 path first. Additional
+mask families, SM80 runtime claims, and SM90/Hopper runtime claims should remain
+fail-closed until their corresponding forward and backward proof exists.
 
 ## Non-Goals
 
@@ -157,17 +176,21 @@ current completion blocker. It should:
 - document hard-gated H100/H200 commands for later gradient and profiler proof
 - keep `backward_ready=False` until those deferred Hopper tests pass
 
-### SM80/SM86 Sparse Path
+### SM86/SM8x Sparse Path
 
-The SM80/SM86 backward path is the strict Phase 4 implementation target. It
-must:
+The SM86/SM8x backward path is the strict Phase 4 implementation target. It
+must first cover the locally proven SM86 path:
 
 - validate supported compute capability, with SM86 as the first local target
 - use an exact sparse interval backward path
-- preserve PE non-causal state-autoregressive semantics
+- preserve PE non-causal state-autoregressive `bound_num=2` semantics
 - match dense reference gradients
 - expose profiler-visible backward kernel markers
 - fail closed if only forward is available
+
+SM80/A100 runtime proof is deferred until SM80 hardware is available. The SM8x
+build may keep SM80 cubins and metadata, but do not claim SM80 backward runtime
+readiness until the hard-gated SM80 tests pass on SM80 hardware.
 
 If any backend remains forward-only, backend routing must report that honestly
 and PE training must reject that backend until it is ready.
@@ -198,8 +221,10 @@ Required cases:
 - mask-head broadcast
 - multiple heads
 - FP16 and BF16
+- head-dim dispatch groups 96 and 128
 - representative sequence lengths
-- SM80/SM86 backend on the local GPU
+- SM86/SM8x backend on the local GPU
+- SM80 only as a hard-gated deferred test on SM80 hardware
 - SM90/Hopper only as hard-gated deferred tests or template checks; SM90 runtime
   gradient parity is not a current Phase 4 exit criterion
 
@@ -281,7 +306,11 @@ uv run pytest -q
 Optional GPU tests should be hard-gated by backend/build, for example:
 
 ```bash
-FLASHMASK_REQUIRE_SM8X=1 uv run pytest -q tests/test_cuda_extension_optional.py
+cd /home/jake/Developer/pe
+FLASHMASK_REQUIRE_SM8X=1 uv run --extra gpu pytest -q \
+  /home/jake/Developer/flashmask/tests/test_cuda_extension_optional.py
+FLASHMASK_REQUIRE_SM86=1 uv run --extra gpu pytest -q \
+  /home/jake/Developer/flashmask/tests/test_cuda_extension_optional.py
 ```
 
 Deferred Hopper validation command, recorded now but not required until
@@ -294,7 +323,9 @@ FLASHMASK_REQUIRE_SM90=1 uv run pytest -q tests/test_cuda_extension_optional.py
 PE integration tests after backend readiness:
 
 ```bash
-PYTHONPATH=/home/jake/Developer/flashmask/src uv run --extra gpu pytest -q tests/test_train.py tests/test_flashmask_gpu_parity.py
+cd /home/jake/Developer/pe
+PYTHONPATH=/home/jake/Developer/flashmask/src uv run --extra gpu pytest -q \
+  tests/test_train.py tests/test_flashmask_sm8x_gpu_parity.py
 ```
 
 The exact test files may change, but the final commands must prove gradient and
@@ -302,14 +333,16 @@ training readiness.
 
 ## Exit Criteria
 
-- SM80/SM86 Q/K/V gradients match dense reference within agreed tolerance on
-  the local supported backend.
-- SM80/SM86 backend reports `backward_ready=True` only after gradient tests
-  pass.
+- SM86/SM8x Q/K/V gradients match dense reference within agreed tolerance on
+  the local supported SM86 backend.
+- SM86/SM8x backend reports `backward_ready=True` only after SM86 gradient
+  tests pass.
+- SM80 backward runtime readiness is not claimed until separate SM80 hardware
+  proof passes.
 - SM90/Hopper backward remains templated and fail-closed unless separate
   H100/H200 gradient and profiler proof has passed; that proof is deferred and
   not required for current Phase 4 completion.
-- SM80/SM86 backward profiler evidence proves sparse kernels ran.
+- SM86/SM8x backward profiler evidence proves sparse kernels ran.
 - PE training no longer rejects FlashMask backends whose backward is ready.
 - A tiny PE training step runs with finite loss and gradients.
 - Inference-only backends still fail closed for training.
