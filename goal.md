@@ -5,9 +5,13 @@ Build `flashmask` as a small standalone package that PE can depend on for fast F
 ## Boundary
 
 - `flashmask` owns sparse mask representation, mask compilation, dense-reference reconstruction for tests, and the kernel-native attention interface.
-- `flashmask` must not depend on Paddle or PaddleNLP; those projects are reference material only.
+- `flashmask` must be standalone and must not depend on large external training frameworks.
 - `pe` owns experiment policy, tokenization, positional encodings, batching, torch tensors, model code, training, and evaluation.
 - `ankos` owns raw cellular automata mechanics and NumPy-style rollout outputs.
+
+## Execution Priority
+
+The kernel is the critical path. Build and verify the FlashAttention 3-compatible sparse forward kernel before expanding PE integration beyond a minimal fail-closed adapter. PE should be used as the downstream correctness and benchmark harness after the kernel path is real.
 
 ## Primary Behavior
 
@@ -32,4 +36,4 @@ The mask representation must also support the structured interval-style masks re
 - GPU integration tests run from the PE repo and verify FlashMask produces scores/logits/losses identical to the dense implementation within tolerance.
 - GPU integration tests verify the FlashMask path actually uses FlashAttention 3.
 - Benchmarks from the PE repo show the FlashMask path is materially faster than the dense SDPA mask path on representative next-state workloads.
-- The package can be installed, imported, tested, and used without importing Paddle or PaddleNLP.
+- The package can be installed, imported, tested, and used without importing large external training frameworks.

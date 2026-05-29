@@ -1,7 +1,26 @@
 [project]
 name = "flashmask"
 version = "0.1.0"
-description = "Add your description here"
+description = "Standalone FlashMask interval mask compiler and reference API"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
+
+[project.scripts]
+flashmask-bench-sm90 = "flashmask.bench_sm90:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["sub"]
