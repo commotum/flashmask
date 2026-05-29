@@ -5,6 +5,8 @@
 #include <mutex>
 #include <vector>
 
+namespace py = pybind11;
+
 #ifndef FLASHMASK_KERNEL_READY
 #define FLASHMASK_KERNEL_READY 0
 #endif
@@ -102,26 +104,32 @@ namespace {
 
 struct CachedDeviceSupport {
   bool initialized = false;
+  bool cuda_available = false;
   bool supported = false;
+  int major = -1;
+  int minor = -1;
 };
 
-CachedDeviceSupport query_current_device_support() {
-#if FLASHMASK_KERNEL_READY
+CachedDeviceSupport query_current_device_info() {
   int device = 0;
   if (cudaGetDevice(&device) != cudaSuccess) {
-    return {};
+    return {true, false, false, -1, -1};
   }
   constexpr int kMaxCachedDevices = 64;
   if (device < 0 || device >= kMaxCachedDevices) {
     cudaDeviceProp prop;
     if (cudaGetDeviceProperties(&prop, device) != cudaSuccess) {
-      return {};
+      return {true, false, false, -1, -1};
     }
+    bool supported = false;
+#if FLASHMASK_KERNEL_READY
 #if defined(FLASHMASK_SM8X_KERNEL_READY)
-    return {true, prop.major == 8 && prop.minor == 6};
+    supported = prop.major == 8 && prop.minor == 6;
 #else
-    return {true, prop.major == 9 && prop.minor == 0};
+    supported = prop.major == 9 && prop.minor == 0;
 #endif
+#endif
+    return {true, true, supported, prop.major, prop.minor};
   }
 
   static std::array<CachedDeviceSupport, kMaxCachedDevices> cache{};
@@ -134,23 +142,25 @@ CachedDeviceSupport query_current_device_support() {
 
   cudaDeviceProp prop;
   if (cudaGetDeviceProperties(&prop, device) != cudaSuccess) {
-    return {};
+    cached = {true, false, false, -1, -1};
+    return cached;
   }
+  bool supported = false;
+#if FLASHMASK_KERNEL_READY
 #if defined(FLASHMASK_SM8X_KERNEL_READY)
-  cached = {true, prop.major == 8 && prop.minor == 6};
+  supported = prop.major == 8 && prop.minor == 6;
 #else
-  cached = {true, prop.major == 9 && prop.minor == 0};
+  supported = prop.major == 9 && prop.minor == 0;
 #endif
+#endif
+  cached = {true, true, supported, prop.major, prop.minor};
   return cached;
-#else
-  return {};
-#endif
 }
 
 }  // namespace
 
 bool flashmask_current_device_is_supported() {
-  return query_current_device_support().supported;
+  return query_current_device_info().supported;
 }
 
 bool flashmask_current_device_is_sm90() {
@@ -185,5 +195,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #else
     return false;
 #endif
+  });
+  m.def("cuda_available", []() {
+    return query_current_device_info().cuda_available;
+  });
+  m.def("current_compute_capability", []() -> py::object {
+    auto info = query_current_device_info();
+    if (!info.cuda_available) {
+      return py::none();
+    }
+    return py::make_tuple(info.major, info.minor);
   });
 }

@@ -211,9 +211,8 @@ are acceptable if already present in the codebase:
 - `FLASHMASK_BUILD_EXPERIMENTAL_CUDA=1`
 - `FLASHMASK_BUILD_EXPERIMENTAL_SM8X_CUDA=1`
 
-If a generic flag such as `FLASHMASK_BUILD_CUDA=1` is introduced, it should map
-unambiguously to one of the explicit build modes or fail with an actionable
-message.
+The generic `FLASHMASK_BUILD_CUDA=1` flag is the stub-extension build mode. It
+must not be combined with either experimental kernel build flag.
 
 The setup/build code must explain missing CUDA, missing PyTorch CUDA, missing
 CUTLASS, and unsupported architecture errors.
@@ -274,7 +273,7 @@ Representative commands:
 uv run pytest -q
 ```
 
-For explicit extension smoke tests:
+For explicit stub-extension smoke tests:
 
 ```bash
 FLASHMASK_BUILD_CUDA=1 uv pip install -e . --no-build-isolation -v

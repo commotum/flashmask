@@ -47,6 +47,8 @@ class BackendInfo:
     training_available: bool = False
     backend_kind: str | None = None
     module_path: str | None = None
+    cuda_available: bool | None = None
+    compute_capability: tuple[int, int] | None = None
     unavailable_reason: str | None = None
 
 
@@ -88,6 +90,8 @@ def backend_info(*, backend: str = "fa3") -> BackendInfo:
         training_available=supports_backward,
         backend_kind=status.backend_kind,
         module_path=status.module_path,
+        cuda_available=status.cuda_available,
+        compute_capability=status.compute_capability,
         unavailable_reason=_backend_unavailable_reason(
             backend=backend,
             requested_kind=requested_kind,

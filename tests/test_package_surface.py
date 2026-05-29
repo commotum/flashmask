@@ -381,6 +381,8 @@ def test_cuda_backend_scaffold_declares_final_op_surface():
     assert 'm.def("backend_kind"' in api_text
     assert 'm.def("forward_ready"' in api_text
     assert 'm.def("backward_ready"' in api_text
+    assert 'm.def("cuda_available"' in api_text
+    assert 'm.def("current_compute_capability"' in api_text
     assert "sm90_sparse_fa3" in api_text
     assert "stub" in api_text
     assert stub.exists()
@@ -609,11 +611,40 @@ def test_setup_normal_metadata_does_not_import_torch(tmp_path):
     assert result.stdout.strip().splitlines()[-1] == "setup-called"
 
 
+def test_setup_cuda_build_modes_are_mutually_exclusive(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    (tmp_path / "setuptools.py").write_text("def setup(**kwargs): pass\n")
+    env = os.environ.copy()
+    env["FLASHMASK_BUILD_CUDA"] = "1"
+    env["FLASHMASK_BUILD_EXPERIMENTAL_CUDA"] = "1"
+    env.pop("FLASHMASK_BUILD_EXPERIMENTAL_SM8X_CUDA", None)
+    pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = str(tmp_path) if not pythonpath else f"{tmp_path}{os.pathsep}{pythonpath}"
+
+    result = subprocess.run(
+        [sys.executable, "setup.py"],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "Set only one FlashMask CUDA build mode" in result.stderr
+
+
 def test_extension_status_is_lazy():
     status = extension_status()
 
     assert isinstance(status.loaded, bool)
     assert isinstance(status.kernel_ready, bool)
+    assert status.cuda_available in (None, True, False)
+    assert status.compute_capability is None or (
+        isinstance(status.compute_capability, tuple)
+        and len(status.compute_capability) == 2
+        and all(isinstance(value, int) for value in status.compute_capability)
+    )
     if status.kernel_ready:
         assert status.loaded is True
         assert status.backend_kind in {

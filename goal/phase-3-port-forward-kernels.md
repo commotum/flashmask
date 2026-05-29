@@ -3,8 +3,9 @@
 ## Pasteable Goal
 
 Port the kernel-native sparse forward paths into the standalone PyTorch
-extension for SM90 FA3-compatible and SM80/SM86 exact interval-mask backends,
-proving dense-reference parity and real sparse-kernel execution. See
+extension for SM90 FA3-compatible and SM86/SM8x exact interval-mask backends,
+proving dense-reference parity and real sparse-kernel execution while preserving
+the Phase 2 ABI. See
 `/home/jake/Developer/flashmask/goal/phase-3-port-forward-kernels.md` for the
 detailed scope, tests, and exit criteria.
 
@@ -16,6 +17,41 @@ extension.
 This phase turns the Phase 2 ABI into real sparse attention execution. The
 central requirement is that disallowed Q/K interactions are skipped by the
 kernel when an entire tile is masked, not computed densely and masked later.
+
+## Phase 2 Handoff
+
+Phase 2 locked the public extension ABI. Phase 3 must build on it, not redesign
+it casually.
+
+The raw torch ops are:
+
+```text
+torch.ops.flashmask.fwd(q, k, v, startend, block_mask, softmax_scale, causal)
+torch.ops.flashmask.bwd(dout, q, k, v, out, softmax_lse, startend, block_mask,
+                        softmax_scale, causal, deterministic)
+```
+
+The raw ops do not take a backend string. The Python layer maps public backend
+names to extension backend kinds and validates the loaded extension before raw
+op dispatch:
+
+- `"fa3"` -> `sm90_sparse_fa3`
+- `"fa2-compatible"` -> `sm8x_sparse_fa2_compatible`
+
+Optional `block_mask` at the Python API boundary is represented as an empty
+int32 tensor at the raw op boundary until block-mask kernels are implemented.
+
+Extension metadata must continue to expose:
+
+- backend kind
+- module path
+- CUDA availability
+- current compute capability
+- forward readiness
+- backward readiness, which remains false in this phase
+
+The Phase 2 completion evidence is
+`/home/jake/Developer/flashmask/goal/phase-2-completion-audit.md`.
 
 ## Non-Goals
 
@@ -59,8 +95,9 @@ The standalone forward path should have this shape:
 ```text
 Python IntervalMask
 -> startend int32 tensor
--> PyTorch extension fwd
--> validate layout/dtype/backend
+-> Python validates requested backend against extension metadata
+-> PyTorch extension fwd with Phase 2 raw-op ABI
+-> validate layout/dtype/device/readiness
 -> slice interval pointers or bind equivalent views
 -> allocate/precompute flashmask_maxmin metadata
 -> launch sparse FlashMask kernel
@@ -116,21 +153,26 @@ Known Paddle-specific pieces to replace:
 The standalone implementation may use static C++/CUDA calls rather than an
 opaque dynload ABI if that is simpler and keeps the package small.
 
-## SM80/SM86 Sparse Path
+## SM86 / SM8x Sparse Path
 
-The SM80/SM86 path must be exact for the same interval semantics. Stock FA2
-causal/window/padding masks are not enough.
+The SM86/SM8x path must be exact for the same interval semantics. Stock FA2
+causal/window/padding masks are not enough. The vendored sources may use SM80
+mainloop names internally, but the current Phase 2 build/readiness gate is the
+SM8x FA2-compatible backend with SM86 as the first local target. Any additional
+SM80 support must have explicit build flags, backend metadata, parity tests, and
+profiler evidence before being claimed.
 
 Acceptable implementation strategies:
 
-- adapt the copied FlashMask v2 SM80/SM86 forward sources
+- adapt the copied FlashMask v2 SM80/SM86-family forward sources
 - implement a custom sparse interval mainloop compatible with the Phase 2 ABI
 - reuse FA2-compatible building blocks only when fully masked tiles are skipped
   in-kernel and PE interval semantics are preserved
 
 Required capabilities:
 
-- compute capability 8.0/8.6 validation, with SM86 as the first local target
+- compute capability 8.6 validation for the first supported local target
+- explicit metadata and tests for any additional SM8x compute capability
 - FP16 and BF16 forward where practical
 - PE non-causal state-autoregressive interval masks
 - output and LSE parity against dense reference
@@ -167,8 +209,10 @@ The C++/CUDA extension should:
 - allocate outputs with PyTorch tensor factories
 - validate tensor devices and dtypes before launching kernels
 - keep error messages actionable
-- expose backend kind and readiness metadata
+- expose backend kind, CUDA availability, current compute capability, and
+  readiness metadata
 - register `torch.ops.flashmask.fwd`
+- keep `torch.ops.flashmask.bwd` registered and fail-closed until Phase 4
 - preserve the Phase 2 ABI unless a documented ABI correction is required
 
 The Python wrapper should:
@@ -190,7 +234,7 @@ GPU forward tests should compare against a dense reference for:
 - mask-head broadcast
 - FP16 and BF16
 - SM90 backend when available
-- SM80/SM86 backend when available
+- SM86/SM8x backend when available
 
 The dense reference may compute attention densely for testing, but it must be
 outside the FlashMask fast path.
@@ -214,6 +258,8 @@ Required evidence:
   FlashMask call
 - backend kind is recorded as `sm90_sparse_fa3` or
   `sm8x_sparse_fa2_compatible`
+- CUDA availability and current compute capability are recorded in backend
+  metadata
 
 Profiler marker names may differ by implementation, but they must be stable
 enough for tests.
@@ -229,7 +275,7 @@ Minimum sanity checks:
   sparse masks
 - dense-equivalent masks are allowed to be similar speed
 - fully masked tile count correlates with lower kernel work
-- SM86 and SM90 records report backend-specific timing separately
+- SM86/SM8x and SM90 records report backend-specific timing separately
 
 Final material speedup proof belongs to Phase 7.
 
@@ -244,23 +290,31 @@ uv run pytest -q
 Optional GPU tests should be hard-gated by architecture/build, for example:
 
 ```bash
+FLASHMASK_BUILD_EXPERIMENTAL_CUDA=1 CUTLASS_HOME=/path/to/cutlass \
+  uv pip install -e . --no-build-isolation -v
 FLASHMASK_REQUIRE_SM90=1 uv run pytest -q tests/test_cuda_extension_optional.py
+
+FLASHMASK_BUILD_EXPERIMENTAL_SM8X_CUDA=1 CUTLASS_HOME=/path/to/cutlass \
+  uv pip install -e . --no-build-isolation -v
 FLASHMASK_REQUIRE_SM8X=1 uv run pytest -q tests/test_cuda_extension_optional.py
 ```
 
-The exact commands can change with the final test layout, but Phase 3 must
-leave reproducible commands for each supported backend.
+If the hard-gate environment variable for SM8x is not yet wired in the tests,
+Phase 3 must add it before claiming SM86/SM8x completion. The exact commands
+can change with the final test layout, but Phase 3 must leave reproducible
+commands for each supported backend.
 
 ## Exit Criteria
 
 - SM90 forward output and LSE match dense reference on GPU within agreed
   tolerance.
-- SM80/SM86 forward output and LSE match dense reference on GPU within agreed
+- SM86/SM8x forward output and LSE match dense reference on GPU within agreed
   tolerance for the supported sparse interval path.
 - Tests or profiler evidence prove fully masked tiles are skipped by the sparse
   kernel path.
 - SM90 artifacts identify the FA3-compatible backend.
-- SM80/SM86 artifacts identify the exact sparse interval backend.
+- SM86/SM8x artifacts identify the exact sparse interval backend and current
+  compute capability.
 - Unsupported masks/backends fail closed.
 - No dense SDPA attention-mask fallback is used by the FlashMask fast path.
-- Phase 4 can implement backward without redesigning the forward ABI.
+- Phase 4 can implement backward without redesigning the Phase 2/3 forward ABI.
