@@ -30,6 +30,9 @@ criterion until Hopper hardware is available.
 Phase 4 completion evidence is recorded in
 `/home/jake/Developer/flashmask/goal/phase-4-completion-audit.md`.
 
+Phase 5 completion evidence is recorded in
+`/home/jake/Developer/flashmask/goal/phase-5-completion-audit.md`.
+
 The locally verified training-capable backend is:
 
 ```text

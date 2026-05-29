@@ -239,7 +239,7 @@ def _backend_gate(torch: Any) -> dict[str, Any]:
 
     import flashmask
 
-    info = flashmask.backend_info()
+    info = flashmask.backend_info(backend="fa3")
     capability = torch.cuda.get_device_capability()
     ready = bool(extension.kernel_ready())
     forward_ready = bool(getattr(extension, "forward_ready", lambda: ready)())
@@ -252,6 +252,8 @@ def _backend_gate(torch: Any) -> dict[str, Any]:
             "kernel_ready": ready,
             "forward_ready": forward_ready,
             "backend_kind": backend_kind,
+            "selected_backend": info.selected_backend,
+            "backward_ready": info.backward_ready,
         }
     if (
         not ready
@@ -268,6 +270,8 @@ def _backend_gate(torch: Any) -> dict[str, Any]:
             "kernel_ready": ready,
             "forward_ready": forward_ready,
             "backend_kind": backend_kind,
+            "selected_backend": info.selected_backend,
+            "backward_ready": info.backward_ready,
         }
     return {
         "status": "ok",
@@ -275,6 +279,8 @@ def _backend_gate(torch: Any) -> dict[str, Any]:
         "kernel_ready": ready,
         "forward_ready": forward_ready,
         "backend_kind": backend_kind,
+        "selected_backend": info.selected_backend,
+        "backward_ready": info.backward_ready,
         "module_path": info.module_path,
     }
 
@@ -303,8 +309,10 @@ def _common_record(torch: Any, gate: dict[str, Any]) -> dict[str, Any]:
         "cuda_version": torch.version.cuda,
         "_C_path": gate.get("module_path"),
         "requested_backend": "fa3",
+        "selected_backend": gate.get("selected_backend"),
         "kernel_ready": bool(gate["kernel_ready"]),
         "forward_ready": bool(gate["forward_ready"]),
+        "backward_ready": bool(gate.get("backward_ready", False)),
         "backend_kind": gate.get("backend_kind"),
     }
 
@@ -373,7 +381,7 @@ def _run_case(
     scale = 1.0 / math.sqrt(head_dim)
     expected_out, expected_lse, additive_mask, density = _dense_reference(torch, q, k, v, mask, scale)
 
-    result = flashmask_attention(q, k, v, mask, softmax_scale=scale)
+    result = flashmask_attention(q, k, v, mask, backend="fa3", softmax_scale=scale)
     if result.backend != "fa3":
         raise RuntimeError(f"expected fa3 backend, got {result.backend!r}")
     if tuple(result.output.shape) != tuple(q.shape):
@@ -402,7 +410,7 @@ def _run_case(
         if profile_key not in profile_state:
             profile_state[profile_key] = _profile_sparse_attention(
                 torch,
-                lambda: flashmask_attention(q, k, v, mask, softmax_scale=scale).output,
+                lambda: flashmask_attention(q, k, v, mask, backend="fa3", softmax_scale=scale).output,
             )
         (
             has_flashmask_fwd,
@@ -492,7 +500,7 @@ def _run_case(
         )
         flash_api_ms = _time_cuda(
             torch,
-            lambda: flashmask_attention(q, k, v, mask, softmax_scale=scale).output,
+            lambda: flashmask_attention(q, k, v, mask, backend="fa3", softmax_scale=scale).output,
             warmup=args.warmup,
             iters=args.iters,
         )

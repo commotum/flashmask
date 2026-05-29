@@ -17,7 +17,24 @@ from .core import IntervalMask
 
 _SPARSE_BACKEND_KIND_BY_BACKEND = {
     "fa3": SPARSE_SM90_FA3_BACKEND_KIND,
+    "sm90-fa3": SPARSE_SM90_FA3_BACKEND_KIND,
     "fa2-compatible": SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
+    "sm8x-fa2-compatible": SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
+}
+_CANONICAL_BACKEND_BY_ALIAS = {
+    "auto": "auto",
+    "fa3": "fa3",
+    "sm90-fa3": "fa3",
+    "fa2-compatible": "fa2-compatible",
+    "sm8x-fa2-compatible": "fa2-compatible",
+}
+_BACKEND_BY_SPARSE_BACKEND_KIND = {
+    SPARSE_SM90_FA3_BACKEND_KIND: "fa3",
+    SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND: "fa2-compatible",
+}
+_PROVEN_COMPUTE_CAPABILITIES_BY_BACKEND_KIND = {
+    SPARSE_SM90_FA3_BACKEND_KIND: frozenset(),
+    SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND: frozenset({(8, 6)}),
 }
 
 
@@ -28,6 +45,9 @@ class FlashMaskAttentionResult:
     output: Any
     softmax_lse: Any
     backend: str
+    requested_backend: str | None = None
+    selected_backend: str | None = None
+    backend_kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -48,12 +68,28 @@ class BackendInfo:
     backend_kind: str | None = None
     module_path: str | None = None
     cuda_available: bool | None = None
+    device_name: str | None = None
     compute_capability: tuple[int, int] | None = None
+    capability: tuple[int, int] | None = None
     supported_compute_capabilities: tuple[tuple[int, int], ...] = ()
+    requested_backend: str | None = None
+    selected_backend: str | None = None
+    forward_ready: bool = False
+    backward_ready: bool = False
+    supports_sm8x: bool = False
     unavailable_reason: str | None = None
 
 
-def backend_info(*, backend: str = "fa3") -> BackendInfo:
+@dataclass(frozen=True)
+class _BackendResolution:
+    requested_backend: str
+    canonical_request: str | None
+    selected_backend: str | None
+    backend_kind: str | None
+    unavailable_reason: str | None = None
+
+
+def backend_info(*, backend: str = "auto") -> BackendInfo:
     """Return backend availability without importing external training stacks.
 
     The package ships the mask representation, dense reference path, and
@@ -62,8 +98,10 @@ def backend_info(*, backend: str = "fa3") -> BackendInfo:
     accidentally treating a dense fallback as the fast path.
     """
 
+    requested_backend = str(backend)
     status = extension_status()
-    requested_kind = _backend_kind_for_name(backend)
+    resolution = _resolve_backend(requested_backend, status)
+    requested_kind = resolution.backend_kind
     is_fa3 = bool(status.loaded and status.backend_kind == SPARSE_SM90_FA3_BACKEND_KIND)
     is_fa2_compatible = bool(
         status.loaded and status.backend_kind == SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND
@@ -74,11 +112,12 @@ def backend_info(*, backend: str = "fa3") -> BackendInfo:
         and status.loaded
         and status.kernel_ready
         and status.forward_ready
+        and _backend_runtime_is_proven(requested_kind, status.compute_capability)
     )
     known_sparse_backend = bool(is_fa3 or is_fa2_compatible)
     supports_backward = bool(ready and status.backward_ready)
     return BackendInfo(
-        name=str(backend),
+        name=requested_backend,
         available=ready,
         is_fa3=is_fa3,
         supports_sparse_mask=ready,
@@ -92,11 +131,17 @@ def backend_info(*, backend: str = "fa3") -> BackendInfo:
         backend_kind=status.backend_kind,
         module_path=status.module_path,
         cuda_available=status.cuda_available,
+        device_name=_current_device_name(status),
         compute_capability=status.compute_capability,
+        capability=status.compute_capability,
         supported_compute_capabilities=status.supported_compute_capabilities,
+        requested_backend=requested_backend,
+        selected_backend=resolution.selected_backend,
+        forward_ready=bool(ready and status.forward_ready),
+        backward_ready=supports_backward,
+        supports_sm8x=is_fa2_compatible,
         unavailable_reason=_backend_unavailable_reason(
-            backend=backend,
-            requested_kind=requested_kind,
+            resolution=resolution,
             status=status,
             ready=ready,
         ),
@@ -104,20 +149,106 @@ def backend_info(*, backend: str = "fa3") -> BackendInfo:
 
 
 def _backend_kind_for_name(backend: str) -> str | None:
-    return _SPARSE_BACKEND_KIND_BY_BACKEND.get(backend)
+    canonical = _CANONICAL_BACKEND_BY_ALIAS.get(backend)
+    if canonical == "auto":
+        return None
+    return _SPARSE_BACKEND_KIND_BY_BACKEND.get(canonical or backend)
+
+
+def _resolve_backend(backend: str, status: Any) -> _BackendResolution:
+    canonical = _CANONICAL_BACKEND_BY_ALIAS.get(backend)
+    if canonical is None:
+        supported = ", ".join(repr(name) for name in sorted(_CANONICAL_BACKEND_BY_ALIAS))
+        return _BackendResolution(
+            requested_backend=backend,
+            canonical_request=None,
+            selected_backend=None,
+            backend_kind=None,
+            unavailable_reason=f"FlashMask attention backend {backend!r} is unknown; expected one of {supported}",
+        )
+    if canonical != "auto":
+        return _BackendResolution(
+            requested_backend=backend,
+            canonical_request=canonical,
+            selected_backend=canonical,
+            backend_kind=_SPARSE_BACKEND_KIND_BY_BACKEND.get(canonical),
+        )
+
+    selected_backend = _BACKEND_BY_SPARSE_BACKEND_KIND.get(status.backend_kind)
+    selected_kind = status.backend_kind if selected_backend is not None else None
+    if selected_backend is None and status.compute_capability == (8, 6):
+        selected_backend = "fa2-compatible"
+        selected_kind = SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND
+    elif selected_backend is None and status.compute_capability == (8, 0):
+        selected_backend = "fa2-compatible"
+        selected_kind = SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND
+    elif selected_backend is None and status.compute_capability == (9, 0):
+        selected_backend = "fa3"
+        selected_kind = SPARSE_SM90_FA3_BACKEND_KIND
+    return _BackendResolution(
+        requested_backend=backend,
+        canonical_request=canonical,
+        selected_backend=selected_backend,
+        backend_kind=selected_kind,
+    )
+
+
+def _backend_runtime_is_proven(backend_kind: str | None, capability: tuple[int, int] | None) -> bool:
+    if backend_kind is None or capability is None:
+        return False
+    return tuple(capability) in _PROVEN_COMPUTE_CAPABILITIES_BY_BACKEND_KIND.get(
+        backend_kind,
+        frozenset(),
+    )
+
+
+def _current_device_name(status: Any) -> str | None:
+    if not status.cuda_available:
+        return None
+    try:
+        import torch
+    except Exception:
+        return None
+    try:
+        if not torch.cuda.is_available():
+            return None
+        return str(torch.cuda.get_device_name())
+    except Exception:
+        return None
 
 
 def _backend_unavailable_reason(
     *,
-    backend: str,
-    requested_kind: str | None,
+    resolution: _BackendResolution,
     status: Any,
     ready: bool,
 ) -> str | None:
     if ready:
         return None
+    if resolution.unavailable_reason is not None:
+        return resolution.unavailable_reason
+    requested_kind = resolution.backend_kind
+    backend = resolution.requested_backend
+    selected = resolution.selected_backend
+    capability = status.compute_capability
+    if requested_kind == SPARSE_SM90_FA3_BACKEND_KIND and capability != (9, 0):
+        return f"backend={backend!r} requires SM90 / compute capability 9.0, got {capability}"
+    if requested_kind == SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND and capability != (8, 6):
+        if capability == (8, 0):
+            return (
+                f"backend={backend!r} selected {selected!r}, but SM80 runtime proof "
+                "is not recorded"
+            )
+        return f"backend={backend!r} requires verified SM86 / compute capability 8.6, got {capability}"
+    if requested_kind and not _backend_runtime_is_proven(requested_kind, capability):
+        if requested_kind == SPARSE_SM90_FA3_BACKEND_KIND:
+            return (
+                f"backend={backend!r} selected {selected!r}, but SM90/Hopper runtime "
+                "proof is not recorded"
+            )
+        return f"backend={backend!r} selected {selected!r}, but runtime proof is not recorded"
     if requested_kind is None:
-        return f"FlashMask attention backend {backend!r} is unknown"
+        return status.unavailable_reason or f"backend={backend!r} could not select a sparse backend"
     if status.backend_kind and status.backend_kind != requested_kind:
         return (
             f"loaded backend kind {status.backend_kind!r} does not match "
@@ -128,9 +259,10 @@ def _backend_unavailable_reason(
 
 def verify_backend(
     *,
-    backend: str = "fa3",
-    require_fa3: bool = True,
+    backend: str = "auto",
+    require_fa3: bool = False,
     require_sparse: bool = True,
+    require_forward: bool = True,
     require_backward: bool = False,
 ) -> BackendInfo:
     """Verify that a production FlashMask backend is available.
@@ -142,6 +274,8 @@ def verify_backend(
     info = backend_info(backend=backend)
     if not info.available:
         raise RuntimeError(info.unavailable_reason or f"backend {backend!r} is unavailable")
+    if require_forward and not info.forward_ready:
+        raise RuntimeError(f"backend {backend!r} does not support forward")
     if require_fa3 and not info.is_fa3:
         raise RuntimeError(f"backend {backend!r} is not FA3-compatible")
     if require_sparse and not info.supports_sparse_mask:
@@ -157,7 +291,7 @@ def flashmask_attention(
     v: Any,
     mask: IntervalMask,
     *,
-    backend: str = "fa3",
+    backend: str = "auto",
     softmax_scale: float | None = None,
     block_mask: Any | None = None,
     causal: bool | None = None,
@@ -174,12 +308,14 @@ def flashmask_attention(
         raise ValueError("causal and is_causal disagree")
     causal_override = causal if causal is not None else is_causal
 
-    if backend not in _SPARSE_BACKEND_KIND_BY_BACKEND:
-        supported = ", ".join(repr(name) for name in _SPARSE_BACKEND_KIND_BY_BACKEND)
+    status = extension_status()
+    resolution = _resolve_backend(str(backend), status)
+    if resolution.canonical_request is None:
+        supported = ", ".join(repr(name) for name in sorted(_CANONICAL_BACKEND_BY_ALIAS))
         raise ValueError(
             f"FlashMask attention backend must be one of {supported}, got {backend!r}"
         )
-    requested_kind = _backend_kind_for_name(backend)
+    requested_kind = resolution.backend_kind
     _validate_experimental_forward_limits(q, k, v, block_mask)
     needs_backward = any(
         bool(getattr(tensor, "requires_grad", False))
@@ -188,7 +324,7 @@ def flashmask_attention(
     try:
         verify_backend(
             backend=backend,
-            require_fa3=backend == "fa3",
+            require_fa3=resolution.selected_backend == "fa3",
             require_sparse=True,
             require_backward=needs_backward,
         )
@@ -208,7 +344,15 @@ def flashmask_attention(
         causal=causal_override,
         backend_kind=requested_kind,
     )
-    return FlashMaskAttentionResult(output=output, softmax_lse=softmax_lse, backend=backend)
+    selected_backend = resolution.selected_backend or str(backend)
+    return FlashMaskAttentionResult(
+        output=output,
+        softmax_lse=softmax_lse,
+        backend=selected_backend,
+        requested_backend=str(backend),
+        selected_backend=selected_backend,
+        backend_kind=requested_kind,
+    )
 
 
 def _validate_experimental_forward_limits(q: Any, k: Any, v: Any, block_mask: Any | None) -> None:

@@ -262,6 +262,13 @@ def _validate_record(
         raise ProofValidationError(
             f"{prefix}: requested_backend is not one of {', '.join(backend_names)}"
         )
+    selected_backend = record.get("selected_backend")
+    if selected_backend is None:
+        raise ProofValidationError(f"{prefix}: selected_backend is missing")
+    if selected_backend not in backend_names:
+        raise ProofValidationError(
+            f"{prefix}: selected_backend is not one of {', '.join(backend_names)}"
+        )
     if record.get("kernel_ready") is not True:
         raise ProofValidationError(f"{prefix}: kernel_ready is not true")
     if record.get("forward_ready") is not True:

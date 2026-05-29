@@ -540,6 +540,33 @@ def test_optional_sm8x_public_autograd_matches_dense_reference():
     torch.testing.assert_close(v.grad.float(), expected_dv, atol=6e-2, rtol=6e-2)
 
 
+def test_optional_sm8x_auto_backend_routes_public_attention():
+    torch = _require_sm8x_raw_op()
+
+    generator = torch.Generator(device="cuda").manual_seed(89)
+    q = torch.randn(1, 6, 2, 64, device="cuda", dtype=torch.float16, generator=generator)
+    k = torch.randn(1, 6, 2, 64, device="cuda", dtype=torch.float16, generator=generator)
+    v = torch.randn(1, 6, 2, 64, device="cuda", dtype=torch.float16, generator=generator)
+    mask = flashmask.compile_pe_state_causal_mask(
+        token_type_id=[[1, 2, 3, 3, 3, 3]],
+        time_index=[[-1, -1, 0, 0, 1, 2]],
+        valid_token=[[True, True, True, True, True, True]],
+        mask_heads=1,
+    )
+
+    info = flashmask.verify_backend(require_backward=False)
+    assert info.requested_backend == "auto"
+    assert info.selected_backend == "fa2-compatible"
+    assert info.backend_kind == flashmask.SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND
+    result = flashmask.flashmask_attention(q, k, v, mask)
+
+    assert result.requested_backend == "auto"
+    assert result.selected_backend == "fa2-compatible"
+    assert result.backend == "fa2-compatible"
+    assert tuple(result.output.shape) == tuple(q.shape)
+    assert tuple(result.softmax_lse.shape) == (q.size(0), q.size(2), q.size(1))
+
+
 def test_optional_sm8x_profiles_flashmask_sparse_kernels():
     torch = _require_sm8x_raw_op()
 

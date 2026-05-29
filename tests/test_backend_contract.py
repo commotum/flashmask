@@ -194,7 +194,10 @@ def test_flashmask_attention_calls_sparse_torch_op_once(monkeypatch):
         loaded=True,
         kernel_ready=True,
         forward_ready=True,
-        backend_kind="sm90_sparse_fa3",
+        backend_kind=SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
+        cuda_available=True,
+        compute_capability=(8, 6),
+        supported_compute_capabilities=((8, 0), (8, 6)),
     )
     monkeypatch.setattr(attention_module, "extension_status", ready)
     monkeypatch.setattr(backend_module, "extension_status", ready)
@@ -204,7 +207,10 @@ def test_flashmask_attention_calls_sparse_torch_op_once(monkeypatch):
 
     assert result.output is out_tensor
     assert result.softmax_lse is lse_tensor
-    assert result.backend == "fa3"
+    assert result.backend == "fa2-compatible"
+    assert result.requested_backend == "auto"
+    assert result.selected_backend == "fa2-compatible"
+    assert result.backend_kind == SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND
     fwd_calls = [call for call in calls if call[0] == "fwd"]
     assert fwd_calls == [
         (
@@ -258,17 +264,8 @@ def test_sparse_forward_caches_startend_tensor_per_device(monkeypatch):
     assert [call[0] for call in calls].count("fwd") == 2
 
 
-@pytest.mark.parametrize(
-    ("backend", "backend_kind"),
-    [
-        ("fa3", SPARSE_SM90_FA3_BACKEND_KIND),
-        ("fa2-compatible", SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND),
-    ],
-)
 def test_flashmask_attention_requires_backward_for_grad_inputs_before_dispatch(
     monkeypatch,
-    backend,
-    backend_kind,
 ):
     mask = flashmask.IntervalMask([[[[1]]]], causal=True, seqlen_q=1)
     q = FakeTensor((1, 1, 1, 1), requires_grad=True)
@@ -279,7 +276,10 @@ def test_flashmask_attention_requires_backward_for_grad_inputs_before_dispatch(
         kernel_ready=True,
         forward_ready=True,
         backward_ready=False,
-        backend_kind=backend_kind,
+        backend_kind=SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
+        cuda_available=True,
+        compute_capability=(8, 6),
+        supported_compute_capabilities=((8, 0), (8, 6)),
     )
     monkeypatch.setattr(attention_module, "extension_status", ready)
     monkeypatch.setattr(backend_module, "extension_status", ready)
@@ -295,9 +295,35 @@ def test_flashmask_attention_requires_backward_for_grad_inputs_before_dispatch(
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
 
     with pytest.raises(NotImplementedError, match="does not support backward"):
-        flashmask.flashmask_attention(q, object(), object(), mask, backend=backend)
+        flashmask.flashmask_attention(q, object(), object(), mask)
 
     assert calls == []
+
+
+def test_flashmask_attention_sm90_public_route_requires_hopper_proof(monkeypatch):
+    mask = flashmask.IntervalMask([[[[1]]]], causal=True, seqlen_q=1)
+    q = FakeTensor((1, 1, 1, 1))
+
+    ready = lambda: ExtensionStatus(
+        loaded=True,
+        kernel_ready=True,
+        forward_ready=True,
+        backend_kind=SPARSE_SM90_FA3_BACKEND_KIND,
+        cuda_available=True,
+        compute_capability=(9, 0),
+        supported_compute_capabilities=((9, 0),),
+    )
+    monkeypatch.setattr(attention_module, "extension_status", ready)
+    monkeypatch.setattr(backend_module, "extension_status", ready)
+
+    info = flashmask.backend_info(backend="sm90-fa3")
+    assert info.requested_backend == "sm90-fa3"
+    assert info.selected_backend == "fa3"
+    assert info.available is False
+    assert "SM90/Hopper runtime proof is not recorded" in str(info.unavailable_reason)
+
+    with pytest.raises(NotImplementedError, match="SM90/Hopper runtime proof"):
+        flashmask.flashmask_attention(q, q, q, mask, backend="sm90-fa3")
 
 
 def test_sparse_attention_forward_with_backward_routes_autograd_to_bwd(monkeypatch):
@@ -320,7 +346,10 @@ def test_sparse_attention_forward_with_backward_routes_autograd_to_bwd(monkeypat
         kernel_ready=True,
         forward_ready=True,
         backward_ready=True,
-        backend_kind=SPARSE_SM90_FA3_BACKEND_KIND,
+        backend_kind=SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
+        cuda_available=True,
+        compute_capability=(8, 6),
+        supported_compute_capabilities=((8, 0), (8, 6)),
     )
     monkeypatch.setattr(backend_module, "extension_status", ready)
 
@@ -368,6 +397,7 @@ def test_sparse_attention_forward_with_backward_routes_autograd_to_bwd(monkeypat
         v,
         mask,
         softmax_scale=0.25,
+        backend_kind=SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
     )
     grads = FakeFunction.last_cls.backward(FakeFunction.last_ctx, dout_tensor, None)
 
@@ -403,7 +433,10 @@ def test_flashmask_attention_uses_backward_surface_for_grad_inputs(monkeypatch):
         kernel_ready=True,
         forward_ready=True,
         backward_ready=True,
-        backend_kind=SPARSE_SM90_FA3_BACKEND_KIND,
+        backend_kind=SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
+        cuda_available=True,
+        compute_capability=(8, 6),
+        supported_compute_capabilities=((8, 0), (8, 6)),
     )
     monkeypatch.setattr(attention_module, "extension_status", ready)
     monkeypatch.setattr(backend_module, "extension_status", ready)
@@ -433,7 +466,7 @@ def test_flashmask_attention_uses_backward_surface_for_grad_inputs(monkeypatch):
                 "softmax_scale": 0.5,
                 "block_mask": None,
                 "causal": None,
-                "backend_kind": SPARSE_SM90_FA3_BACKEND_KIND,
+                "backend_kind": SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
             },
         )
     ]
@@ -447,7 +480,10 @@ def test_flashmask_attention_rejects_nonempty_block_mask_before_dispatch(monkeyp
         loaded=True,
         kernel_ready=True,
         forward_ready=True,
-        backend_kind="sm90_sparse_fa3",
+        backend_kind=SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
+        cuda_available=True,
+        compute_capability=(8, 6),
+        supported_compute_capabilities=((8, 0), (8, 6)),
     )
     monkeypatch.setattr(attention_module, "extension_status", ready)
 
@@ -469,7 +505,10 @@ def test_flashmask_attention_rejects_nontensor_block_mask_before_dispatch(monkey
         loaded=True,
         kernel_ready=True,
         forward_ready=True,
-        backend_kind="sm90_sparse_fa3",
+        backend_kind=SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
+        cuda_available=True,
+        compute_capability=(8, 6),
+        supported_compute_capabilities=((8, 0), (8, 6)),
     )
     monkeypatch.setattr(attention_module, "extension_status", ready)
 
@@ -484,7 +523,10 @@ def test_flashmask_attention_rejects_native_gqa_before_dispatch(monkeypatch):
         loaded=True,
         kernel_ready=True,
         forward_ready=True,
-        backend_kind="sm90_sparse_fa3",
+        backend_kind=SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
+        cuda_available=True,
+        compute_capability=(8, 6),
+        supported_compute_capabilities=((8, 0), (8, 6)),
     )
     monkeypatch.setattr(attention_module, "extension_status", ready)
 
@@ -550,7 +592,10 @@ def test_flashmask_attention_allows_non_128_head_dim_to_dispatch(monkeypatch):
         loaded=True,
         kernel_ready=True,
         forward_ready=True,
-        backend_kind="sm90_sparse_fa3",
+        backend_kind=SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
+        cuda_available=True,
+        compute_capability=(8, 6),
+        supported_compute_capabilities=((8, 0), (8, 6)),
     )
     monkeypatch.setattr(attention_module, "extension_status", ready)
     monkeypatch.setattr(backend_module, "extension_status", ready)
@@ -583,7 +628,7 @@ def test_flashmask_attention_allows_non_128_head_dim_to_dispatch(monkeypatch):
     assert calls[0][6] is True
 
 
-def test_backend_info_exposes_forward_only_capability_limits(monkeypatch):
+def test_backend_info_keeps_unproven_sm90_fail_closed(monkeypatch):
     monkeypatch.setattr(
         attention_module,
         "extension_status",
@@ -601,16 +646,23 @@ def test_backend_info_exposes_forward_only_capability_limits(monkeypatch):
 
     info = flashmask.backend_info()
 
-    assert info.available is True
+    assert info.name == "auto"
+    assert info.requested_backend == "auto"
+    assert info.selected_backend == "fa3"
+    assert info.available is False
     assert info.supports_backward is False
     assert info.training_available is False
+    assert info.forward_ready is False
+    assert info.backward_ready is False
     assert info.supports_block_mask is False
     assert info.supports_native_gqa is False
     assert info.supported_dtypes == ("float16", "bfloat16")
     assert info.max_head_dim == 128
     assert info.cuda_available is True
     assert info.compute_capability == (9, 0)
+    assert info.capability == (9, 0)
     assert info.supported_compute_capabilities == ((9, 0),)
+    assert "SM90/Hopper runtime proof is not recorded" in str(info.unavailable_reason)
 
 
 def test_backend_info_supports_sm8x_fa2_compatible_kind(monkeypatch):
@@ -632,17 +684,24 @@ def test_backend_info_supports_sm8x_fa2_compatible_kind(monkeypatch):
 
     info = flashmask.backend_info(backend="fa2-compatible")
 
+    assert info.name == "fa2-compatible"
+    assert info.requested_backend == "fa2-compatible"
+    assert info.selected_backend == "fa2-compatible"
     assert info.available is True
     assert info.is_fa3 is False
     assert info.is_fa2_compatible is True
+    assert info.supports_sm8x is True
     assert info.supports_sparse_mask is True
     assert info.supports_backward is False
     assert info.training_available is False
+    assert info.forward_ready is True
+    assert info.backward_ready is False
     assert info.supported_dtypes == ("float16", "bfloat16")
     assert info.max_head_dim == 128
     assert info.backend_kind == SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND
     assert info.cuda_available is True
     assert info.compute_capability == (8, 6)
+    assert info.capability == (8, 6)
     assert info.supported_compute_capabilities == ((8, 0), (8, 6))
     assert info.unavailable_reason is None
     assert flashmask.verify_backend(backend="fa2-compatible", require_fa3=False) == info
@@ -657,7 +716,85 @@ def test_backend_info_supports_sm8x_fa2_compatible_kind(monkeypatch):
     assert result.output == "out"
     assert result.softmax_lse == "lse"
     assert result.backend == "fa2-compatible"
+    assert result.requested_backend == "fa2-compatible"
+    assert result.selected_backend == "fa2-compatible"
+    assert result.backend_kind == SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND
     assert calls[0][1]["backend_kind"] == SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND
+
+
+def test_auto_backend_selects_verified_sm86_backend(monkeypatch):
+    monkeypatch.setattr(
+        attention_module,
+        "extension_status",
+        lambda: ExtensionStatus(
+            loaded=True,
+            kernel_ready=True,
+            forward_ready=True,
+            backward_ready=True,
+            backend_kind=SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
+            cuda_available=True,
+            compute_capability=(8, 6),
+            supported_compute_capabilities=((8, 0), (8, 6)),
+        ),
+    )
+
+    info = flashmask.verify_backend(require_backward=True)
+
+    assert info.name == "auto"
+    assert info.requested_backend == "auto"
+    assert info.selected_backend == "fa2-compatible"
+    assert info.backend_kind == SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND
+    assert info.available is True
+    assert info.forward_ready is True
+    assert info.backward_ready is True
+    assert info.training_available is True
+
+
+def test_auto_backend_does_not_claim_sm80_without_runtime_proof(monkeypatch):
+    monkeypatch.setattr(
+        attention_module,
+        "extension_status",
+        lambda: ExtensionStatus(
+            loaded=True,
+            kernel_ready=True,
+            forward_ready=True,
+            backward_ready=True,
+            backend_kind=SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
+            cuda_available=True,
+            compute_capability=(8, 0),
+            supported_compute_capabilities=((8, 0), (8, 6)),
+        ),
+    )
+
+    info = flashmask.backend_info()
+
+    assert info.selected_backend == "fa2-compatible"
+    assert info.available is False
+    assert "SM80 runtime proof is not recorded" in str(info.unavailable_reason)
+    with pytest.raises(RuntimeError, match="SM80 runtime proof"):
+        flashmask.verify_backend()
+
+
+def test_public_backend_aliases_normalize_to_selected_backend(monkeypatch):
+    monkeypatch.setattr(
+        attention_module,
+        "extension_status",
+        lambda: ExtensionStatus(
+            loaded=True,
+            kernel_ready=True,
+            forward_ready=True,
+            backend_kind=SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
+            cuda_available=True,
+            compute_capability=(8, 6),
+            supported_compute_capabilities=((8, 0), (8, 6)),
+        ),
+    )
+
+    info = flashmask.backend_info(backend="sm8x-fa2-compatible")
+
+    assert info.requested_backend == "sm8x-fa2-compatible"
+    assert info.selected_backend == "fa2-compatible"
+    assert info.available is True
 
 
 def test_flashmask_attention_rejects_unknown_backend_before_dispatch(monkeypatch):

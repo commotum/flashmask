@@ -151,7 +151,9 @@ def test_sm90_benchmark_harness_is_lazy_and_scripted():
     assert "import torch" not in bench_text.split("def _import_torch():", 1)[0]
     assert "\"backend\": \"fa3\"" in bench_text
     assert "\"requested_backend\": \"fa3\"" in bench_text
+    assert "\"selected_backend\"" in bench_text
     assert "\"forward_ready\"" in bench_text
+    assert "\"backward_ready\"" in bench_text
     assert "dense_sdpa_ms" in bench_text
     assert "\"speedup\"" in bench_text
     assert "\"flashmask_api_ms\"" in bench_text

@@ -37,12 +37,12 @@ mask = compile_pe_state_causal_mask(
 )
 ```
 
-The CUDA/FA3 attention backend is optional and fail-closed:
+The CUDA attention backend is optional and fail-closed:
 
 ```python
 from flashmask import flashmask_attention
 
-# Raises NotImplementedError unless a compatible kernel backend is available.
+# backend="auto" selects the verified local sparse backend when available.
 flashmask_attention(q, k, v, mask)
 ```
 
@@ -55,18 +55,21 @@ The kernel is the project priority. The Python package now has a lazy backend
 loader and a PyTorch extension scaffold under `src/flashmask/csrc` with the
 intended `flashmask::fwd` and `flashmask::bwd` op names.
 
-The experimental SM90 path is forward-only. Calls with gradient-tracking Q/K/V
-fail unless `verify_backend(require_backward=True)` succeeds, so training cannot
+The current verified public route is SM86 / compute capability 8.6 through the
+FA2-compatible sparse interval backend. Calls with gradient-tracking Q/K/V fail
+unless `verify_backend(require_backward=True)` succeeds, so training cannot
 silently use a forward-only raw op.
 
 Current experimental forward limits are reported by `backend_info()`: fp16/bf16,
 head/value dimensions up to 128, expanded Q/K/V heads only, and no block-mask
-metadata path yet.
+metadata path yet. `backend_info()` defaults to `backend="auto"` and reports
+both requested and selected backend names.
 
-SM90 uses the FlashAttention 3-compatible sparse path. SM86 is also a required
-target, but it needs an exact interval-aware sparse kernel path; stock FA2
-causal/window/padding controls are not sufficient for PE's state-autoregressive
-mask.
+SM80 and SM90/Hopper routes are represented in metadata but remain hard-gated
+until their own hardware proof exists. SM90 uses the FlashAttention
+3-compatible sparse path when that future proof is enabled. SM86 uses the exact
+interval-aware sparse kernel path because stock FA2 causal/window/padding
+controls are not sufficient for PE's state-autoregressive mask.
 
 By default, installs do not build the CUDA extension. The stub extension can be
 built from a CUDA-enabled PyTorch environment with:
