@@ -124,7 +124,7 @@ CachedDeviceSupport query_current_device_info() {
     bool supported = false;
 #if FLASHMASK_KERNEL_READY
 #if defined(FLASHMASK_SM8X_KERNEL_READY)
-    supported = prop.major == 8 && prop.minor == 6;
+    supported = prop.major == 8 && (prop.minor == 0 || prop.minor == 6);
 #else
     supported = prop.major == 9 && prop.minor == 0;
 #endif
@@ -148,7 +148,7 @@ CachedDeviceSupport query_current_device_info() {
   bool supported = false;
 #if FLASHMASK_KERNEL_READY
 #if defined(FLASHMASK_SM8X_KERNEL_READY)
-  supported = prop.major == 8 && prop.minor == 6;
+  supported = prop.major == 8 && (prop.minor == 0 || prop.minor == 6);
 #else
   supported = prop.major == 9 && prop.minor == 0;
 #endif
@@ -205,5 +205,21 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       return py::none();
     }
     return py::make_tuple(info.major, info.minor);
+  });
+  m.def("supported_compute_capabilities", []() -> py::tuple {
+#if FLASHMASK_KERNEL_READY
+#if defined(FLASHMASK_SM8X_KERNEL_READY)
+    py::tuple capabilities(2);
+    capabilities[0] = py::make_tuple(8, 0);
+    capabilities[1] = py::make_tuple(8, 6);
+    return capabilities;
+#else
+    py::tuple capabilities(1);
+    capabilities[0] = py::make_tuple(9, 0);
+    return capabilities;
+#endif
+#else
+    return py::tuple();
+#endif
   });
 }

@@ -3,20 +3,25 @@
 ## Pasteable Goal
 
 Port the kernel-native sparse forward paths into the standalone PyTorch
-extension for SM90 FA3-compatible and SM86/SM8x exact interval-mask backends,
-proving dense-reference parity and real sparse-kernel execution while preserving
-the Phase 2 ABI. See
+extension while preserving the Phase 2 ABI: prove SM86/SM8x dense-reference
+parity and sparse-kernel execution on the available local GPU, and put the SM90
+FA3-compatible path in place with build/fail-closed/hard-gated verification
+hooks for later Hopper runtime proof. See
 `/home/jake/Developer/flashmask/goal/phase-3-port-forward-kernels.md` for the
 detailed scope, tests, and exit criteria.
 
 ## Objective
 
 Port/adapt the kernel-native sparse forward paths into the standalone PyTorch
-extension.
+extension without requiring Hopper hardware for the current phase.
 
-This phase turns the Phase 2 ABI into real sparse attention execution. The
-central requirement is that disallowed Q/K interactions are skipped by the
-kernel when an entire tile is masked, not computed densely and masked later.
+This phase turns the Phase 2 ABI into real sparse attention execution on the
+available SM86/SM8x target. The central runtime requirement for the local phase
+is that disallowed Q/K interactions are handled by the sparse kernel path, not
+by dense SDPA masking. SM90/Hopper runtime parity, profiler, and speed proof are
+deferred until Hopper hardware is available, but the SM90 implementation must
+remain wired, buildable, fail-closed on non-Hopper devices, and covered by a
+reproducible hard-gated test command.
 
 ## Phase 2 Handoff
 
@@ -50,8 +55,10 @@ Extension metadata must continue to expose:
 - forward readiness
 - backward readiness, which remains false in this phase
 
-The Phase 2 completion evidence is
+Phase 2 is complete. The Phase 2 completion evidence is
 `/home/jake/Developer/flashmask/goal/phase-2-completion-audit.md`.
+Phase 3 should treat this ABI as fixed unless a required correction is
+documented with updated tests and a replacement audit note.
 
 ## Non-Goals
 
@@ -130,16 +137,26 @@ The output should let the main attention kernel classify each Q/K tile as:
 
 The SM90 path should port the FlashMask v2/FA3-compatible implementation.
 
-Required capabilities:
+Current Phase 3 requirements that do not require Hopper hardware:
 
-- compute capability 9.0 validation
-- FP16 and BF16 forward
-- head dimension initially up to 128 unless more is proven
-- `startend` with `bound_num` in `{1, 2, 4}`
-- PE non-causal interval masks
-- causal masks where supported by the reference design
-- output tensor and LSE parity against dense reference
-- profiler markers for FlashMask preprocessing and forward kernel
+- SM90 source path is present in the standalone extension tree.
+- SM90 build mode is explicit and separate from stub and SM8x build modes.
+- compute capability 9.0 validation fails closed on non-Hopper devices.
+- backend metadata identifies the SM90 build as `sm90_sparse_fa3`.
+- raw op ABI and Python backend selection match the Phase 2 contract.
+- FP16 and BF16 forward instantiations are present for the documented head
+  dimensions.
+- `startend` with `bound_num` in `{1, 2, 4}` is accepted by the wrapper where
+  the underlying reference design supports it.
+- no dense SDPA or dense attention-mask fallback is introduced.
+- a hard-gated Hopper verification command is documented so that later H100/H200
+  access can produce runtime proof without redesigning this phase.
+
+Deferred Hopper verification, not required for current Phase 3 completion:
+
+- SM90 forward output and LSE parity against dense reference.
+- SM90 profiler markers for FlashMask preprocessing and forward kernels.
+- SM90 speed sanity or benchmark proof.
 
 Known Paddle-specific pieces to replace:
 
@@ -151,7 +168,9 @@ Known Paddle-specific pieces to replace:
 - Paddle distributed/NVSHMEM setup unless explicitly deferred
 
 The standalone implementation may use static C++/CUDA calls rather than an
-opaque dynload ABI if that is simpler and keeps the package small.
+opaque dynload ABI if that is simpler and keeps the package small. Runtime SM90
+claims must not be made until the deferred Hopper verification command passes on
+Hopper hardware.
 
 ## SM86 / SM8x Sparse Path
 
@@ -224,7 +243,8 @@ The Python wrapper should:
 
 ## Correctness Tests
 
-GPU forward tests should compare against a dense reference for:
+GPU forward tests should compare against a dense reference for the available
+SM86/SM8x backend:
 
 - output tensor
 - softmax LSE where applicable
@@ -233,8 +253,10 @@ GPU forward tests should compare against a dense reference for:
 - multiple heads
 - mask-head broadcast
 - FP16 and BF16
-- SM90 backend when available
-- SM86/SM8x backend when available
+- SM86/SM8x backend on the local GPU
+
+SM90 dense-reference tests should exist as hard-gated optional tests, but they
+are not current Phase 3 exit criteria until Hopper hardware is available.
 
 The dense reference may compute attention densely for testing, but it must be
 outside the FlashMask fast path.
@@ -247,22 +269,22 @@ Representative checks:
 
 ## Profiler And Kernel Evidence
 
-Tests and benchmark records should prove the sparse path ran.
+Tests and benchmark records should prove the local SM86/SM8x sparse path ran.
 
-Required evidence:
+Required local evidence:
 
 - `torch.ops.flashmask.fwd` appears in profiler events
 - preprocessing kernel marker appears when preprocessing is CUDA-side
 - sparse FlashMask forward kernel marker appears
 - dense SDPA, dense matmul/softmax fallback markers do not appear inside the
   FlashMask call
-- backend kind is recorded as `sm90_sparse_fa3` or
-  `sm8x_sparse_fa2_compatible`
+- backend kind is recorded as `sm8x_sparse_fa2_compatible`
 - CUDA availability and current compute capability are recorded in backend
   metadata
 
-Profiler marker names may differ by implementation, but they must be stable
-enough for tests.
+SM90 profiler evidence is deferred until Hopper hardware is available. Profiler
+marker names may differ by implementation, but they must be stable enough for
+tests on each backend once that backend can be run.
 
 ## Performance Sanity
 
@@ -275,7 +297,9 @@ Minimum sanity checks:
   sparse masks
 - dense-equivalent masks are allowed to be similar speed
 - fully masked tile count correlates with lower kernel work
-- SM86/SM8x and SM90 records report backend-specific timing separately
+- SM86/SM8x records report backend-specific timing
+
+SM90 timing records are deferred until Hopper hardware is available.
 
 Final material speedup proof belongs to Phase 7.
 
@@ -287,34 +311,75 @@ CPU-safe tests should still pass:
 uv run pytest -q
 ```
 
-Optional GPU tests should be hard-gated by architecture/build, for example:
+Optional GPU tests should be hard-gated by architecture/build. The hard gates
+are already split by backend:
+
+- `FLASHMASK_REQUIRE_SM90=1` requires a ready SM90 `sm90_sparse_fa3`
+  extension and must fail instead of skip when that backend is unavailable.
+- `FLASHMASK_REQUIRE_SM8X=1` requires a ready SM80 or SM86
+  `sm8x_sparse_fa2_compatible` extension and must fail instead of skip when
+  that backend is unavailable.
+
+Local SM8x examples:
 
 ```bash
-FLASHMASK_BUILD_EXPERIMENTAL_CUDA=1 CUTLASS_HOME=/path/to/cutlass \
-  uv pip install -e . --no-build-isolation -v
-FLASHMASK_REQUIRE_SM90=1 uv run pytest -q tests/test_cuda_extension_optional.py
-
 FLASHMASK_BUILD_EXPERIMENTAL_SM8X_CUDA=1 CUTLASS_HOME=/path/to/cutlass \
   uv pip install -e . --no-build-isolation -v
 FLASHMASK_REQUIRE_SM8X=1 uv run pytest -q tests/test_cuda_extension_optional.py
 ```
 
-If the hard-gate environment variable for SM8x is not yet wired in the tests,
-Phase 3 must add it before claiming SM86/SM8x completion. The exact commands
-can change with the final test layout, but Phase 3 must leave reproducible
-commands for each supported backend.
+When using PE's CUDA-enabled uv environment as the local GPU test environment,
+install FlashMask into that interpreter and run the FlashMask optional tests by
+absolute path:
+
+```bash
+FLASHMASK_BUILD_EXPERIMENTAL_SM8X_CUDA=1 CUTLASS_HOME=/path/to/cutlass \
+  uv pip install --python /home/jake/Developer/pe/.venv/bin/python \
+  -e /home/jake/Developer/flashmask --no-build-isolation -v
+
+cd /home/jake/Developer/pe
+FLASHMASK_REQUIRE_SM8X=1 uv run --extra gpu pytest -q \
+  /home/jake/Developer/flashmask/tests/test_cuda_extension_optional.py
+```
+
+The exact commands can change with the final test layout, but Phase 3 must
+leave reproducible commands for every supported backend.
+
+Deferred Hopper verification command, recorded now but not required until
+Hopper hardware is available:
+
+```bash
+FLASHMASK_BUILD_EXPERIMENTAL_CUDA=1 CUTLASS_HOME=/path/to/cutlass \
+  uv pip install -e . --no-build-isolation -v
+FLASHMASK_REQUIRE_SM90=1 uv run pytest -q tests/test_cuda_extension_optional.py
+```
 
 ## Exit Criteria
 
-- SM90 forward output and LSE match dense reference on GPU within agreed
-  tolerance.
 - SM86/SM8x forward output and LSE match dense reference on GPU within agreed
   tolerance for the supported sparse interval path.
-- Tests or profiler evidence prove fully masked tiles are skipped by the sparse
-  kernel path.
-- SM90 artifacts identify the FA3-compatible backend.
+- Tests or profiler evidence prove the local SM86/SM8x sparse kernel path runs
+  and dense SDPA/matmul/softmax fallback does not run inside the FlashMask call.
+- SM90 artifacts identify the FA3-compatible backend when built, validate
+  compute capability 9.0, and fail closed on non-Hopper devices.
+- SM90 hard-gated runtime parity/profiler tests are present and documented for
+  later Hopper verification, but they are not required to pass in the current
+  non-Hopper environment.
 - SM86/SM8x artifacts identify the exact sparse interval backend and current
   compute capability.
 - Unsupported masks/backends fail closed.
 - No dense SDPA attention-mask fallback is used by the FlashMask fast path.
 - Phase 4 can implement backward without redesigning the Phase 2/3 forward ABI.
+
+## Deferred Hopper Verification
+
+When Hopper hardware is available, run the hard-gated SM90 command above and
+record a proof artifact showing:
+
+- SM90 forward output and LSE match dense reference on GPU within agreed
+  tolerance.
+- SM90 FlashMask preprocessing and sparse forward kernel profiler markers are
+  present.
+- dense SDPA, dense matmul, and dense softmax fallback markers are absent inside
+  the FlashMask call.
+- backend metadata reports `sm90_sparse_fa3` on compute capability 9.0.

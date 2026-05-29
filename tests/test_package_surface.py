@@ -383,6 +383,7 @@ def test_cuda_backend_scaffold_declares_final_op_surface():
     assert 'm.def("backward_ready"' in api_text
     assert 'm.def("cuda_available"' in api_text
     assert 'm.def("current_compute_capability"' in api_text
+    assert 'm.def("supported_compute_capabilities"' in api_text
     assert "sm90_sparse_fa3" in api_text
     assert "stub" in api_text
     assert stub.exists()
@@ -395,7 +396,7 @@ def test_cuda_backend_readiness_uses_exact_device_gates():
     bench_text = (root / "src" / "flashmask" / "bench_sm90.py").read_text()
 
     assert "prop.major == 9 && prop.minor == 0" in api_text
-    assert "prop.major == 8 && prop.minor == 6" in api_text
+    assert "prop.major == 8 && (prop.minor == 0 || prop.minor == 6)" in api_text
     assert "tuple(capability) != (9, 0)" in bench_text
     assert "capability[0] != 9" not in bench_text
     assert "capability[0] == 9" not in bench_text
@@ -561,7 +562,10 @@ def test_setup_declares_experimental_sm90_kernel_build_surface():
     assert "flash_fwd_hdim128_bf16_sm86.cu" in setup_text
     assert "flash_fwd_hdim128_fp16_sm86.cu" in setup_text
     assert "FLASHMASK_SM8X_KERNEL_READY=1" in setup_text
+    assert "compute_80" in setup_text
+    assert "code=sm_80" in setup_text
     assert "compute_86" in setup_text
+    assert "code=sm_86" in setup_text
 
 
 def test_setup_normal_metadata_does_not_import_torch(tmp_path):
@@ -644,6 +648,13 @@ def test_extension_status_is_lazy():
         isinstance(status.compute_capability, tuple)
         and len(status.compute_capability) == 2
         and all(isinstance(value, int) for value in status.compute_capability)
+    )
+    assert isinstance(status.supported_compute_capabilities, tuple)
+    assert all(
+        isinstance(value, tuple)
+        and len(value) == 2
+        and all(isinstance(part, int) for part in value)
+        for value in status.supported_compute_capabilities
     )
     if status.kernel_ready:
         assert status.loaded is True

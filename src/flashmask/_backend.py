@@ -21,6 +21,7 @@ class ExtensionStatus:
     module_path: str | None = None
     cuda_available: bool | None = None
     compute_capability: tuple[int, int] | None = None
+    supported_compute_capabilities: tuple[tuple[int, int], ...] = ()
     unavailable_reason: str | None = None
 
 
@@ -65,6 +66,7 @@ def extension_status() -> ExtensionStatus:
     kind_fn = getattr(module, "backend_kind", None)
     cuda_available_fn = getattr(module, "cuda_available", None)
     compute_capability_fn = getattr(module, "current_compute_capability", None)
+    supported_compute_capabilities_fn = getattr(module, "supported_compute_capabilities", None)
     reported_ready = bool(ready_fn()) if callable(ready_fn) else False
     reported_forward_ready = (
         bool(forward_ready_fn()) if callable(forward_ready_fn) else reported_ready
@@ -74,6 +76,9 @@ def extension_status() -> ExtensionStatus:
     cuda_available = bool(cuda_available_fn()) if callable(cuda_available_fn) else None
     compute_capability = _normalize_compute_capability(
         compute_capability_fn() if callable(compute_capability_fn) else None
+    )
+    supported_compute_capabilities = _normalize_supported_compute_capabilities(
+        supported_compute_capabilities_fn() if callable(supported_compute_capabilities_fn) else None
     )
     supported_backend_kind = backend_kind in SUPPORTED_SPARSE_BACKEND_KINDS
     ready = bool(reported_ready and supported_backend_kind)
@@ -96,6 +101,7 @@ def extension_status() -> ExtensionStatus:
         module_path=getattr(module, "__file__", None),
         cuda_available=cuda_available,
         compute_capability=compute_capability,
+        supported_compute_capabilities=supported_compute_capabilities,
         unavailable_reason=unavailable_reason,
     )
 
@@ -110,6 +116,23 @@ def _normalize_compute_capability(value: Any) -> tuple[int, int] | None:
     except (TypeError, ValueError):
         return None
     return int(major), int(minor)
+
+
+def _normalize_supported_compute_capabilities(value: Any) -> tuple[tuple[int, int], ...]:
+    if value is None:
+        return ()
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    try:
+        items = tuple(value)
+    except TypeError:
+        return ()
+    normalized: list[tuple[int, int]] = []
+    for item in items:
+        capability = _normalize_compute_capability(item)
+        if capability is not None:
+            normalized.append(capability)
+    return tuple(normalized)
 
 
 def sparse_attention_forward(

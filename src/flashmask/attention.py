@@ -49,6 +49,7 @@ class BackendInfo:
     module_path: str | None = None
     cuda_available: bool | None = None
     compute_capability: tuple[int, int] | None = None
+    supported_compute_capabilities: tuple[tuple[int, int], ...] = ()
     unavailable_reason: str | None = None
 
 
@@ -92,6 +93,7 @@ def backend_info(*, backend: str = "fa3") -> BackendInfo:
         module_path=status.module_path,
         cuda_available=status.cuda_available,
         compute_capability=status.compute_capability,
+        supported_compute_capabilities=status.supported_compute_capabilities,
         unavailable_reason=_backend_unavailable_reason(
             backend=backend,
             requested_kind=requested_kind,

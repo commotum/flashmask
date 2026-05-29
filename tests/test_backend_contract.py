@@ -595,6 +595,7 @@ def test_backend_info_exposes_forward_only_capability_limits(monkeypatch):
             backend_kind="sm90_sparse_fa3",
             cuda_available=True,
             compute_capability=(9, 0),
+            supported_compute_capabilities=((9, 0),),
         ),
     )
 
@@ -609,6 +610,7 @@ def test_backend_info_exposes_forward_only_capability_limits(monkeypatch):
     assert info.max_head_dim == 128
     assert info.cuda_available is True
     assert info.compute_capability == (9, 0)
+    assert info.supported_compute_capabilities == ((9, 0),)
 
 
 def test_backend_info_supports_sm8x_fa2_compatible_kind(monkeypatch):
@@ -622,6 +624,7 @@ def test_backend_info_supports_sm8x_fa2_compatible_kind(monkeypatch):
             backend_kind=SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
             cuda_available=True,
             compute_capability=(8, 6),
+            supported_compute_capabilities=((8, 0), (8, 6)),
         ),
     )
     mask = flashmask.IntervalMask([[[[1]]]], causal=True, seqlen_q=1)
@@ -640,6 +643,7 @@ def test_backend_info_supports_sm8x_fa2_compatible_kind(monkeypatch):
     assert info.backend_kind == SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND
     assert info.cuda_available is True
     assert info.compute_capability == (8, 6)
+    assert info.supported_compute_capabilities == ((8, 0), (8, 6))
     assert info.unavailable_reason is None
     assert flashmask.verify_backend(backend="fa2-compatible", require_fa3=False) == info
 

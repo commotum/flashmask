@@ -9,8 +9,20 @@ import pytest
 import flashmask
 
 
-def _require_or_skip(reason: str) -> None:
-    if os.environ.get("FLASHMASK_REQUIRE_SM90") == "1":
+SUPPORTED_SM8X_CAPABILITIES = {(8, 0), (8, 6)}
+
+
+def _require_or_skip(
+    reason: str,
+    *,
+    require_envs: tuple[str, ...] = (
+        "FLASHMASK_REQUIRE_SM90",
+        "FLASHMASK_REQUIRE_SM8X",
+        "FLASHMASK_REQUIRE_SM86",
+        "FLASHMASK_REQUIRE_SM80",
+    ),
+) -> None:
+    if any(os.environ.get(env_name) == "1" for env_name in require_envs):
         raise AssertionError(reason)
     pytest.skip(reason)
 
@@ -19,7 +31,7 @@ def _require_torch():
     try:
         import torch
     except Exception as exc:  # pragma: no cover - depends on local environment
-        _require_or_skip(f"torch is required for FlashMask SM90 validation: {exc}")
+        _require_or_skip(f"torch is required for FlashMask CUDA validation: {exc}")
     return torch
 
 
@@ -33,10 +45,38 @@ def test_compiled_extension_device_gate_when_present():
     import flashmask._C as extension
 
     capability = torch.cuda.get_device_capability()
+    capability_tuple = tuple(capability)
     ready = bool(extension.kernel_ready())
     backend_kind = str(extension.backend_kind())
+    if os.environ.get("FLASHMASK_REQUIRE_SM8X") == "1" and (
+        capability_tuple not in SUPPORTED_SM8X_CAPABILITIES
+        or backend_kind != flashmask.SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND
+        or not ready
+    ):
+        raise AssertionError(
+            "FlashMask SM8x sparse forward requires a ready SM80 or SM86 CUDA device, "
+            f"got {capability}"
+        )
+    if os.environ.get("FLASHMASK_REQUIRE_SM86") == "1" and (
+        capability_tuple != (8, 6)
+        or backend_kind != flashmask.SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND
+        or not ready
+    ):
+        raise AssertionError(
+            "FlashMask SM86 sparse forward requires a ready compute capability 8.6 "
+            f"CUDA device, got {capability}"
+        )
+    if os.environ.get("FLASHMASK_REQUIRE_SM80") == "1" and (
+        capability_tuple != (8, 0)
+        or backend_kind != flashmask.SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND
+        or not ready
+    ):
+        raise AssertionError(
+            "FlashMask SM80 sparse forward requires a ready compute capability 8.0 "
+            f"CUDA device, got {capability}"
+        )
     if os.environ.get("FLASHMASK_REQUIRE_SM90") == "1" and (
-        tuple(capability) != (9, 0)
+        capability_tuple != (9, 0)
         or backend_kind != flashmask.SPARSE_SM90_FA3_BACKEND_KIND
         or not ready
     ):
@@ -46,12 +86,18 @@ def test_compiled_extension_device_gate_when_present():
         )
     if ready:
         assert (
-            tuple(capability) == (9, 0)
+            capability_tuple == (9, 0)
             and backend_kind == flashmask.SPARSE_SM90_FA3_BACKEND_KIND
         ) or (
-            tuple(capability) == (8, 6)
+            capability_tuple in SUPPORTED_SM8X_CAPABILITIES
             and backend_kind == flashmask.SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND
         )
+        if hasattr(extension, "supported_compute_capabilities"):
+            supported = {tuple(item) for item in extension.supported_compute_capabilities()}
+            if backend_kind == flashmask.SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND:
+                assert SUPPORTED_SM8X_CAPABILITIES <= supported
+            else:
+                assert (9, 0) in supported
 
     q = torch.randn(1, 4, 1, 128, device="cuda", dtype=torch.float16)
     k = torch.randn(1, 4, 1, 128, device="cuda", dtype=torch.float16)
@@ -124,7 +170,8 @@ def _require_sm90_raw_op():
     capability = torch.cuda.get_device_capability()
     if tuple(capability) != (9, 0) or not bool(extension.kernel_ready()):
         _require_or_skip(
-            "FlashMask sparse forward requires an SM90 / compute capability 9.0 CUDA device"
+            "FlashMask sparse forward requires an SM90 / compute capability 9.0 CUDA device",
+            require_envs=("FLASHMASK_REQUIRE_SM90",),
         )
     return torch
 
@@ -139,10 +186,20 @@ def _require_sm8x_raw_op():
     import flashmask._C as extension
 
     capability = torch.cuda.get_device_capability()
-    if tuple(capability) != (8, 6) or not bool(extension.kernel_ready()):
-        _require_or_skip("FlashMask SM8x sparse forward requires an SM86 / compute capability 8.6 CUDA device")
+    if tuple(capability) not in SUPPORTED_SM8X_CAPABILITIES or not bool(extension.kernel_ready()):
+        _require_or_skip(
+            "FlashMask SM8x sparse forward requires an SM80 or SM86 CUDA device",
+            require_envs=("FLASHMASK_REQUIRE_SM8X", "FLASHMASK_REQUIRE_SM86", "FLASHMASK_REQUIRE_SM80"),
+        )
+    if os.environ.get("FLASHMASK_REQUIRE_SM86") == "1" and tuple(capability) != (8, 6):
+        raise AssertionError(f"FlashMask SM86 sparse forward requires compute capability 8.6, got {capability}")
+    if os.environ.get("FLASHMASK_REQUIRE_SM80") == "1" and tuple(capability) != (8, 0):
+        raise AssertionError(f"FlashMask SM80 sparse forward requires compute capability 8.0, got {capability}")
     if extension.backend_kind() != flashmask.SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND:
-        _require_or_skip("compiled FlashMask extension is not the SM8x sparse backend")
+        _require_or_skip(
+            "compiled FlashMask extension is not the SM8x sparse backend",
+            require_envs=("FLASHMASK_REQUIRE_SM8X", "FLASHMASK_REQUIRE_SM86", "FLASHMASK_REQUIRE_SM80"),
+        )
     return torch
 
 
@@ -236,6 +293,44 @@ def test_optional_sm8x_pe_backward_path_fails_closed():
             mask.causal,
             False,
         )
+
+
+def test_optional_sm8x_profiles_flashmask_sparse_kernels():
+    torch = _require_sm8x_raw_op()
+
+    generator = torch.Generator(device="cuda").manual_seed(88)
+    q = torch.randn(1, 6, 2, 64, device="cuda", dtype=torch.float16, generator=generator)
+    k = torch.randn(1, 6, 2, 64, device="cuda", dtype=torch.float16, generator=generator)
+    v = torch.randn(1, 6, 2, 64, device="cuda", dtype=torch.float16, generator=generator)
+    mask = flashmask.compile_pe_state_causal_mask(
+        token_type_id=[[1, 2, 3, 3, 3, 3]],
+        time_index=[[-1, -1, 0, 0, 1, 2]],
+        valid_token=[[True, True, True, True, True, True]],
+        mask_heads=1,
+    )
+    startend = torch.as_tensor(mask.to_list(), device="cuda", dtype=torch.int32)
+    block_mask = torch.empty(0, device="cuda", dtype=torch.int32)
+    scale = 1.0 / math.sqrt(q.size(-1))
+
+    for _ in range(3):
+        torch.ops.flashmask.fwd(q, k, v, startend, block_mask, scale, mask.causal)
+    torch.cuda.synchronize()
+
+    with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ]
+    ) as profiler:
+        torch.ops.flashmask.fwd(q, k, v, startend, block_mask, scale, mask.causal)
+    torch.cuda.synchronize()
+
+    event_names = {event.key for event in profiler.key_averages()}
+    assert "flashmask::fwd" in event_names
+    assert any("scanMaxMin" in name for name in event_names)
+    assert any("cutlass_flashmask_kernel" in name for name in event_names)
+    assert not any("scaled_dot_product" in name for name in event_names)
+    assert not any(name in {"aten::matmul", "aten::softmax"} for name in event_names)
 
 
 @pytest.mark.parametrize(
