@@ -24,6 +24,32 @@ deferred until H100/H200 hardware is available; this phase should leave the
 SM90 JSONL schema fields, validators, artifact locations, and commands ready,
 but those records are not required for current completion.
 
+SM80/A100 proof is also deferred. SM86/A6000 results must not be used to claim
+SM80 runtime speed or correctness.
+
+## Phase 6 Handoff
+
+Phase 6 completion evidence is recorded in
+`/home/jake/Developer/flashmask/goal/phase-6-completion-audit.md`.
+
+The current verified PE integration state is:
+
+```text
+normal PE backend: flashmask
+package request: backend="auto"
+local selected backend: fa2-compatible
+backend kind: sm8x_sparse_fa2_compatible
+device: SM86, compute capability 8.6
+forward/backward: verified
+training: PE tiny training verified
+rollout: incremental query masks and sampler KV-cache rollout parity verified
+```
+
+Phase 7 should focus on reproducible speed/proof artifacts, not on rebuilding
+PE integration. Normal PE execution should keep using the public `flashmask`
+backend. Proof benchmarks may request explicit package backend
+`fa2-compatible` so the artifact is tied to the SM86 backend under test.
+
 ## Non-Goals
 
 - Do not use synthetic-only benchmarks as the final PE proof.
@@ -31,6 +57,8 @@ but those records are not required for current completion.
 - Do not count forward-only inference benchmarks as training proof.
 - Do not compare against an artificially slow dense reference.
 - Do not accept a FlashMask path that falls back to dense SDPA.
+- Do not treat Phase 6 parity/smoke tests as speed proof.
+- Do not claim SM80 speed proof from the local SM86/A6000 artifact.
 
 ## Benchmark Scope
 
@@ -49,6 +77,7 @@ Required benchmark families:
 - Optional train-step benchmark:
   - forward + backward + optimizer step
   - required before claiming training speedup
+  - no current Phase 6 artifact proves train-step speed
 
 Synthetic query/block benchmarks may remain useful diagnostics, but they are not
 final completion evidence unless they are tied to actual PE rollout shapes.
@@ -93,6 +122,7 @@ Training proof records:
 - gradient parity or gradient norm parity
 - finite gradients
 - backward backend readiness
+- `profiler_flashmask_bwd`
 
 Correctness must pass before speedup is considered.
 
@@ -117,27 +147,33 @@ Profiler marker names should be stable and documented per backend.
 
 Benchmark output should be JSONL so proof validators can inspect every record.
 
-Minimum fields:
+Current PE attention benchmark records already use the following proof-relevant
+fields:
 
 - `status`
 - `passed`
 - `case`
-- `workload`
+- `backend`
 - `requested_backend`
 - `selected_backend`
 - `backend_kind`
+- `kernel_ready`
+- `forward_ready`
+- `backward_ready`
 - `device`
 - `capability`
 - `torch_version`
 - `cuda_version`
+- `_C_path`
 - `B`
 - `Q`
 - `K`
 - `H`
 - `D`
 - `dtype`
-- `mask_density`
 - `query_mask_shape`
+- `query_density`
+- `allowed_density`
 - `dense_sdpa_ms`
 - `flashmask_ms`
 - `speedup`
@@ -151,12 +187,11 @@ Minimum fields:
 - `atol`
 - `rtol`
 - `profiler_flashmask_fwd`
-- `profiler_flashmask_bwd`
+- `profiler_check_skipped`
+- `required_flashmask_cuda_kernel_markers`
 - `profiler_flashmask_cuda_kernel_events`
 - `profiler_missing_flashmask_cuda_kernel_markers`
 - `profiler_dense_attention_events`
-- `forward_ready`
-- `backward_ready`
 
 Rollout records should also include:
 
@@ -195,7 +230,8 @@ Validators should reject records when:
 
 Validators should support backend-specific proof targets:
 
-- SM80/SM86 exact sparse interval proof
+- SM86 exact sparse interval proof for the current local target
+- SM80 exact sparse interval proof as a separate deferred target
 - SM90 FA3-compatible proof as a deferred Hopper target
 - optional combined proof after both SM8x and Hopper artifact sets exist
 
@@ -255,6 +291,7 @@ Recommended artifact paths:
 
 ```text
 /home/jake/Developer/pe/artifacts/pe-flashmask-sm86.jsonl
+/home/jake/Developer/pe/artifacts/pe-flashmask-sm86-rollout.jsonl
 /home/jake/Developer/pe/artifacts/pe-flashmask-sm86-train.jsonl
 /home/jake/Developer/pe/artifacts/pe-flashmask-sm90.jsonl        # deferred
 /home/jake/Developer/pe/artifacts/pe-flashmask-sm90-train.jsonl  # deferred
@@ -278,12 +315,12 @@ H100/H200 hardware after the SM90 backend has been separately proven ready.
 Example SM86 proof:
 
 ```bash
-PE_REQUIRE_FLASHMASK_SM8X=1 PYTHONPATH=/home/jake/Developer/flashmask/src uv run --extra gpu pytest -q tests/test_flashmask_sm8x_gpu_parity.py
+PE_REQUIRE_FLASHMASK_SM8X=1 PYTHONPATH=/home/jake/Developer/flashmask/src uv run --extra gpu pytest -q tests/test_train.py tests/test_flashmask_sm8x_gpu_parity.py
 uv run --extra gpu python benchmarks/bench_flashmask_attention.py --backend fa2-compatible --require-sm86 --cases full,rollout --dtypes bf16 --batch-sizes 1 --seq-lens 4096 --heads 4 --head-dim 128 --warmup 20 --iters 100 --min-speedup 1.5 --jsonl --output-jsonl artifacts/pe-flashmask-sm86.jsonl
 uv run --extra gpu flashmask-validate-proof --backend fa2-compatible --min-speedup 1.5 --require-case full --require-case rollout artifacts/pe-flashmask-sm86.jsonl
 ```
 
-Example train proof after backward:
+Example train proof after a train-step benchmark exists:
 
 ```bash
 uv run --extra gpu python benchmarks/bench_flashmask_train_step.py --backend auto --min-speedup 1.05 --jsonl --output-jsonl artifacts/pe-flashmask-train.jsonl
@@ -294,7 +331,9 @@ documented and reproducible.
 
 ## Exit Criteria
 
-- SM80/SM86 proof validates the exact sparse interval backend.
+- SM86 proof validates the exact sparse interval backend on the local A6000.
+- SM80 proof remains a separate deferred target until SM80/A100-class hardware
+  is available.
 - SM90/Hopper proof templates, validator target, and artifact paths are
   documented, but SM90 runtime proof is deferred until H100/H200 hardware is
   available.
