@@ -39,10 +39,18 @@ PROOF_BACKEND_SPECS = {
         "backend_names": ("fa2-compatible", "flashmask-fa2-compatible"),
         "cuda_kernel_markers": REQUIRED_FLASHMASK_SM8X_CUDA_KERNEL_MARKERS,
     },
+    "sm80": {
+        "label": "SM80",
+        "capability": [8, 0],
+        "backend_kind": SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
+        "backend_names": ("fa2-compatible", "flashmask-fa2-compatible"),
+        "cuda_kernel_markers": REQUIRED_FLASHMASK_SM8X_CUDA_KERNEL_MARKERS,
+    },
 }
 PROOF_BACKEND_ALIASES = {
     "fa3": "sm90",
     "fa2-compatible": "sm86",
+    "sm8x-fa2-compatible": "sm86",
 }
 
 
@@ -83,6 +91,24 @@ def validate_sm86_proof_jsonl(
     return validate_proof_jsonl(
         paths,
         backend="sm86",
+        min_speedup=min_speedup,
+        required_cases=required_cases,
+        require_speedup=require_speedup,
+    )
+
+
+def validate_sm80_proof_jsonl(
+    paths: list[str | Path],
+    *,
+    min_speedup: float,
+    required_cases: set[str] | None = None,
+    require_speedup: bool = True,
+) -> list[dict[str, Any]]:
+    """Load and validate one or more SM80 proof JSONL files."""
+
+    return validate_proof_jsonl(
+        paths,
+        backend="sm80",
         min_speedup=min_speedup,
         required_cases=required_cases,
         require_speedup=require_speedup,
@@ -142,6 +168,24 @@ def validate_sm86_proof_records(
     validate_proof_records(
         records,
         backend="sm86",
+        min_speedup=min_speedup,
+        required_cases=required_cases,
+        require_speedup=require_speedup,
+    )
+
+
+def validate_sm80_proof_records(
+    records: list[dict[str, Any]],
+    *,
+    min_speedup: float,
+    required_cases: set[str] | None = None,
+    require_speedup: bool = True,
+) -> None:
+    """Validate parsed benchmark records as real SM80 sparse-kernel proof."""
+
+    validate_proof_records(
+        records,
+        backend="sm80",
         min_speedup=min_speedup,
         required_cases=required_cases,
         require_speedup=require_speedup,

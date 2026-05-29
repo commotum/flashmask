@@ -67,6 +67,10 @@ EXPERIMENTAL_FWD_SOURCES = [
 ]
 
 EXPERIMENTAL_SM8X_FWD_SOURCES = [
+    FLASHMASK_V2_INSTANTIATIONS_DIR / "flash_fwd_hdim96_bf16_sm80.cu",
+    FLASHMASK_V2_INSTANTIATIONS_DIR / "flash_fwd_hdim96_fp16_sm80.cu",
+    FLASHMASK_V2_INSTANTIATIONS_DIR / "flash_fwd_hdim128_bf16_sm80.cu",
+    FLASHMASK_V2_INSTANTIATIONS_DIR / "flash_fwd_hdim128_fp16_sm80.cu",
     FLASHMASK_V2_INSTANTIATIONS_DIR / "flash_fwd_hdim96_bf16_sm86.cu",
     FLASHMASK_V2_INSTANTIATIONS_DIR / "flash_fwd_hdim96_fp16_sm86.cu",
     FLASHMASK_V2_INSTANTIATIONS_DIR / "flash_fwd_hdim128_bf16_sm86.cu",

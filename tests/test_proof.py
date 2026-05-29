@@ -7,6 +7,8 @@ import pytest
 from flashmask import (
     ProofValidationError,
     validate_proof_records,
+    validate_sm80_proof_jsonl,
+    validate_sm80_proof_records,
     validate_sm86_proof_jsonl,
     validate_sm86_proof_records,
     validate_sm90_proof_jsonl,
@@ -80,6 +82,10 @@ def _valid_sm86_record(**overrides):
     return record
 
 
+def _valid_sm80_record(**overrides):
+    return _valid_sm86_record(capability=[8, 0], **overrides)
+
+
 def test_validate_sm90_proof_records_accepts_complete_artifact():
     validate_sm90_proof_records(
         [_valid_record()],
@@ -96,8 +102,17 @@ def test_validate_sm86_proof_records_accepts_backend_specific_artifact():
     )
 
 
+def test_validate_sm80_proof_records_accepts_backend_specific_artifact():
+    validate_sm80_proof_records(
+        [_valid_sm80_record()],
+        min_speedup=1.5,
+        required_cases={"full"},
+    )
+
+
 def test_validate_proof_records_dispatches_by_backend():
     validate_proof_records([_valid_sm86_record()], backend="fa2-compatible", min_speedup=1.5)
+    validate_proof_records([_valid_sm80_record()], backend="sm80", min_speedup=1.5)
 
 
 def test_validate_sm86_proof_does_not_require_sm90_prepare_kernel_marker():
@@ -204,6 +219,15 @@ def test_validate_sm86_proof_jsonl_loads_artifact(tmp_path):
     assert len(records) == 1
 
 
+def test_validate_sm80_proof_jsonl_loads_artifact(tmp_path):
+    path = tmp_path / "sm80.jsonl"
+    path.write_text(json.dumps(_valid_sm80_record()) + "\n")
+
+    records = validate_sm80_proof_jsonl([path], min_speedup=1.5, required_cases={"full"})
+
+    assert len(records) == 1
+
+
 def test_validate_sm90_proof_cli(tmp_path):
     path = tmp_path / "proof.jsonl"
     path.write_text(json.dumps(_valid_record()) + "\n")
@@ -252,3 +276,29 @@ def test_validate_sm86_proof_cli(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert "validated 1 FlashMask SM86 proof records" in result.stdout
+
+
+def test_validate_sm80_proof_cli(tmp_path):
+    path = tmp_path / "proof-sm80.jsonl"
+    path.write_text(json.dumps(_valid_sm80_record()) + "\n")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "flashmask.proof",
+            str(path),
+            "--backend",
+            "sm80",
+            "--min-speedup",
+            "1.5",
+            "--require-case",
+            "full",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "validated 1 FlashMask SM80 proof records" in result.stdout

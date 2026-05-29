@@ -23,6 +23,10 @@ deferred until Hopper hardware is available, but the SM90 implementation must
 remain wired, buildable, fail-closed on non-Hopper devices, and covered by a
 reproducible hard-gated test command.
 
+No current Phase 3 exit criterion may depend on executing code on an SM90/Hopper
+GPU. Hopper access is a later validation pass, not a blocker for completing the
+local Phase 3 work.
+
 ## Phase 2 Handoff
 
 Phase 2 locked the public extension ABI. Phase 3 must build on it, not redesign
@@ -327,6 +331,11 @@ FLASHMASK_BUILD_EXPERIMENTAL_SM8X_CUDA=1 CUTLASS_HOME=/path/to/cutlass \
   uv pip install -e . --no-build-isolation -v
 FLASHMASK_REQUIRE_SM8X=1 uv run pytest -q tests/test_cuda_extension_optional.py
 ```
+
+Use `FLASHMASK_REQUIRE_SM86=1` to require exact SM86 runtime proof on the local
+RTX A6000-class path. Use `FLASHMASK_REQUIRE_SM80=1` on SM80/A100 hardware
+before claiming SM80 runtime parity/profiler proof. The SM8x build may include
+both SM80 and SM86 cubins, but runtime proof is architecture-specific.
 
 When using PE's CUDA-enabled uv environment as the local GPU test environment,
 install FlashMask into that interpreter and run the FlashMask optional tests by

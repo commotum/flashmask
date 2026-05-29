@@ -214,20 +214,7 @@ def _dense_reference(torch, q, k, v, mask):
     return out, torch.logsumexp(scores, dim=-1), scale
 
 
-@pytest.mark.parametrize("dtype_name", ["float16", "bfloat16"])
-def test_optional_sm8x_raw_op_matches_pe_dense_reference(dtype_name):
-    torch = _require_sm8x_raw_op()
-    dtype = getattr(torch, dtype_name)
-    generator = torch.Generator(device="cuda").manual_seed(86)
-    q = torch.randn(1, 6, 2, 64, device="cuda", dtype=dtype, generator=generator)
-    k = torch.randn(1, 6, 2, 64, device="cuda", dtype=dtype, generator=generator)
-    v = torch.randn(1, 6, 2, 64, device="cuda", dtype=dtype, generator=generator)
-    mask = flashmask.compile_pe_state_causal_mask(
-        token_type_id=[[1, 2, 3, 3, 3, 3]],
-        time_index=[[-1, -1, 0, 0, 1, 2]],
-        valid_token=[[True, True, True, True, True, True]],
-        mask_heads=1,
-    )
+def _assert_flashmask_raw_matches_dense(torch, q, k, v, mask):
     startend = torch.as_tensor(mask.to_list(), device="cuda", dtype=torch.int32)
     block_mask = torch.empty(0, device="cuda", dtype=torch.int32)
     expected_out, expected_lse, scale = _dense_reference(torch, q, k, v, mask)
@@ -242,10 +229,166 @@ def test_optional_sm8x_raw_op_matches_pe_dense_reference(dtype_name):
         mask.causal,
     )
 
-    atol = 6e-2 if dtype == torch.bfloat16 else 3e-2
-    rtol = 6e-2 if dtype == torch.bfloat16 else 3e-2
+    atol = 6e-2 if q.dtype == torch.bfloat16 else 3e-2
+    rtol = 6e-2 if q.dtype == torch.bfloat16 else 3e-2
     torch.testing.assert_close(out.float(), expected_out, atol=atol, rtol=rtol)
     torch.testing.assert_close(lse.float(), expected_lse, atol=atol, rtol=rtol)
+
+
+def _time_cuda_ms(torch, fn, *, warmup=5, iters=30, repeats=3):
+    timings = []
+    for _ in range(repeats):
+        for _ in range(warmup):
+            fn()
+        torch.cuda.synchronize()
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for _ in range(iters):
+            fn()
+        end.record()
+        torch.cuda.synchronize()
+        timings.append(start.elapsed_time(end) / iters)
+    return min(timings)
+
+
+@pytest.mark.parametrize("dtype_name", ["float16", "bfloat16"])
+def test_optional_sm8x_raw_op_matches_pe_dense_reference(dtype_name):
+    torch = _require_sm8x_raw_op()
+    dtype = getattr(torch, dtype_name)
+    generator = torch.Generator(device="cuda").manual_seed(86)
+    q = torch.randn(1, 6, 2, 64, device="cuda", dtype=dtype, generator=generator)
+    k = torch.randn(1, 6, 2, 64, device="cuda", dtype=dtype, generator=generator)
+    v = torch.randn(1, 6, 2, 64, device="cuda", dtype=dtype, generator=generator)
+    mask = flashmask.compile_pe_state_causal_mask(
+        token_type_id=[[1, 2, 3, 3, 3, 3]],
+        time_index=[[-1, -1, 0, 0, 1, 2]],
+        valid_token=[[True, True, True, True, True, True]],
+        mask_heads=1,
+    )
+    _assert_flashmask_raw_matches_dense(torch, q, k, v, mask)
+
+
+def _sm8x_full_sequence_multibatch_mask():
+    return flashmask.compile_pe_state_causal_mask(
+        token_type_id=[
+            [1, 2, 3, 3, 3, 3, 3, 3],
+            [1, 2, 3, 3, 3, 3, 3, 3],
+        ],
+        time_index=[
+            [-1, -1, 1, 1, 2, 3, 3, 4],
+            [-1, -1, 1, 2, 2, 3, 4, 4],
+        ],
+        valid_token=[
+            [True, True, True, True, True, True, True, True],
+            [True, True, True, True, True, True, True, True],
+        ],
+        mask_heads=3,
+    )
+
+
+def _sm8x_cached_query_multibatch_mask():
+    return flashmask.compile_pe_state_causal_query_mask(
+        query_token_type_id=[
+            [1, 2, 3, 3],
+            [2, 3, 3, 3],
+        ],
+        query_time_index=[
+            [-1, -1, 1, 2],
+            [-1, 1, 2, 3],
+        ],
+        key_token_type_id=[
+            [1, 2, 3, 3, 3, 0],
+            [1, 2, 3, 3, 3, 0],
+        ],
+        key_time_index=[
+            [-1, -1, 1, 2, 3, -1],
+            [-1, -1, 1, 2, 3, -1],
+        ],
+        key_valid_token=[
+            [True, True, True, True, False, False],
+            [True, True, True, True, True, False],
+        ],
+        mask_heads=2,
+    )
+
+
+@pytest.mark.parametrize(
+    ("case_name", "dtype_name", "heads", "head_dim", "seed", "mask_factory"),
+    [
+        ("full_sequence_multibatch_broadcast", "float16", 6, 96, 89, _sm8x_full_sequence_multibatch_mask),
+        ("cached_query_multibatch_bf16", "bfloat16", 4, 128, 90, _sm8x_cached_query_multibatch_mask),
+    ],
+)
+def test_optional_sm8x_raw_op_matches_dense_reference_matrix(
+    case_name,
+    dtype_name,
+    heads,
+    head_dim,
+    seed,
+    mask_factory,
+):
+    torch = _require_sm8x_raw_op()
+    dtype = getattr(torch, dtype_name)
+    mask = mask_factory()
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+    batch, mask_heads, seqlen_k, _bound_num = mask.shape
+    assert heads % mask_heads == 0
+    q = torch.randn(
+        batch,
+        mask.seqlen_q,
+        heads,
+        head_dim,
+        device="cuda",
+        dtype=dtype,
+        generator=generator,
+    )
+    k = torch.randn(
+        batch,
+        seqlen_k,
+        heads,
+        head_dim,
+        device="cuda",
+        dtype=dtype,
+        generator=generator,
+    )
+    v = torch.randn(
+        batch,
+        seqlen_k,
+        heads,
+        head_dim,
+        device="cuda",
+        dtype=dtype,
+        generator=generator,
+    )
+
+    _assert_flashmask_raw_matches_dense(torch, q, k, v, mask)
+
+
+def test_optional_sm8x_rejects_unsupported_mask_kinds():
+    torch = _require_sm8x_raw_op()
+    q = torch.randn(1, 4, 1, 64, device="cuda", dtype=torch.float16)
+    k = torch.randn(1, 4, 1, 64, device="cuda", dtype=torch.float16)
+    v = torch.randn(1, 4, 1, 64, device="cuda", dtype=torch.float16)
+    block_mask = torch.empty(0, device="cuda", dtype=torch.int32)
+
+    causal = flashmask.causal_mask(4)
+    causal_startend = torch.as_tensor(causal.to_list(), device="cuda", dtype=torch.int32)
+    with pytest.raises(RuntimeError, match="non-causal interval masks only"):
+        torch.ops.flashmask.fwd(q, k, v, causal_startend, block_mask, float("nan"), causal.causal)
+
+    bound4 = flashmask.from_dense_bool_mask(
+        [
+            [False, True, False, True],
+            [True, True, True, True],
+            [False, True, False, True],
+            [True, True, True, True],
+        ],
+        bound_num=4,
+    )
+    bound4_startend = torch.as_tensor(bound4.to_list(), device="cuda", dtype=torch.int32)
+    with pytest.raises(RuntimeError, match="bound_num=2 masks only"):
+        torch.ops.flashmask.fwd(q, k, v, bound4_startend, block_mask, float("nan"), bound4.causal)
 
 
 def test_optional_sm8x_pe_backward_path_fails_closed():
@@ -331,6 +474,60 @@ def test_optional_sm8x_profiles_flashmask_sparse_kernels():
     assert any("cutlass_flashmask_kernel" in name for name in event_names)
     assert not any("scaled_dot_product" in name for name in event_names)
     assert not any(name in {"aten::matmul", "aten::softmax"} for name in event_names)
+
+
+def test_optional_sm8x_performance_sanity_tracks_mask_sparsity():
+    torch = _require_sm8x_raw_op()
+    batch, seqlen_q, seqlen_k, heads, head_dim = 1, 128, 2048, 2, 64
+    generator = torch.Generator(device="cuda").manual_seed(91)
+    q = torch.randn(
+        batch, seqlen_q, heads, head_dim, device="cuda", dtype=torch.float16, generator=generator
+    )
+    k = torch.randn(
+        batch, seqlen_k, heads, head_dim, device="cuda", dtype=torch.float16, generator=generator
+    )
+    v = torch.randn(
+        batch, seqlen_k, heads, head_dim, device="cuda", dtype=torch.float16, generator=generator
+    )
+    block_mask = torch.empty(0, device="cuda", dtype=torch.int32)
+    scale = 1.0 / math.sqrt(head_dim)
+
+    def interval_mask(allowed_k_blocks):
+        bounds = [
+            [seqlen_q, 0] if key_idx < allowed_k_blocks * 64 else [0, 0]
+            for key_idx in range(seqlen_k)
+        ]
+        return flashmask.IntervalMask([[bounds]], causal=False, seqlen_q=seqlen_q)
+
+    sparse_mask = interval_mask(allowed_k_blocks=4)
+    dense_equiv_mask = interval_mask(allowed_k_blocks=seqlen_k // 64)
+    sparse_startend = torch.as_tensor(sparse_mask.to_list(), device="cuda", dtype=torch.int32)
+    dense_equiv_startend = torch.as_tensor(dense_equiv_mask.to_list(), device="cuda", dtype=torch.int32)
+    sparse_allowed = torch.tensor(sparse_mask.to_bool_mask(nheads=heads), device="cuda")
+
+    def sparse_flashmask():
+        return torch.ops.flashmask.fwd(q, k, v, sparse_startend, block_mask, scale, False)
+
+    def dense_equiv_flashmask():
+        return torch.ops.flashmask.fwd(q, k, v, dense_equiv_startend, block_mask, scale, False)
+
+    def dense_reference():
+        scores = torch.einsum("bqhd,bkhd->bhqk", q.float(), k.float()) * scale
+        probs = torch.softmax(scores.masked_fill(~sparse_allowed, -torch.inf), dim=-1)
+        return torch.einsum("bhqk,bkhd->bqhd", probs, v.float())
+
+    sparse_ms = _time_cuda_ms(torch, sparse_flashmask)
+    dense_equiv_ms = _time_cuda_ms(torch, dense_equiv_flashmask)
+    dense_reference_ms = _time_cuda_ms(torch, dense_reference, iters=10)
+
+    assert sparse_ms < dense_equiv_ms * 0.90, (
+        f"sparse interval path did not get cheaper with masked K blocks: "
+        f"sparse={sparse_ms:.4f}ms dense_equiv={dense_equiv_ms:.4f}ms"
+    )
+    assert sparse_ms < dense_reference_ms, (
+        f"sparse interval path is slower than dense reference: "
+        f"sparse={sparse_ms:.4f}ms dense_reference={dense_reference_ms:.4f}ms"
+    )
 
 
 @pytest.mark.parametrize(

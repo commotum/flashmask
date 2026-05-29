@@ -311,6 +311,17 @@ Flash_fwd_params make_forward_params(
   return params;
 }
 
+#ifdef FLASHMASK_SM8X_V2_BUILD
+template <typename T, int kHeadDim>
+void run_sm8x_mha_fwd(Flash_fwd_params& params, cudaStream_t stream, int arch) {
+  if (arch == 80) {
+    run_mha_fwd_<80, T, kHeadDim, kHeadDim, false, false, false, false>(params, stream);
+    return;
+  }
+  run_mha_fwd_<86, T, kHeadDim, kHeadDim, false, false, false, false>(params, stream);
+}
+#endif
+
 }  // namespace
 
 std::vector<at::Tensor> flashmask_fwd_cuda(
@@ -327,7 +338,9 @@ std::vector<at::Tensor> flashmask_fwd_cuda(
   const CachedDeviceInfo device_info = query_device_info(q.get_device());
   const int arch = device_info.arch;
 #ifdef FLASHMASK_SM8X_V2_BUILD
-  TORCH_CHECK(arch == 86, "experimental FlashMask SM8x V2 forward requires an SM86 / compute capability 8.6 GPU");
+  TORCH_CHECK(
+      arch == 80 || arch == 86,
+      "experimental FlashMask SM8x V2 forward requires an SM80 or SM86 GPU");
 #else
   TORCH_CHECK(arch == 90, "experimental FlashMask forward requires an SM90 / compute capability 9.0 GPU");
 #endif
@@ -359,13 +372,13 @@ std::vector<at::Tensor> flashmask_fwd_cuda(
   if (q.scalar_type() == at::kBFloat16) {
     if (rounded_head_dim == 96) {
 #ifdef FLASHMASK_SM8X_V2_BUILD
-      run_mha_fwd_<86, cutlass::bfloat16_t, 96, 96, false, false, false, false>(params, stream);
+      run_sm8x_mha_fwd<cutlass::bfloat16_t, 96>(params, stream, arch);
 #else
       run_mha_fwd_<90, cutlass::bfloat16_t, 96, 96, false, false, false, false>(params, stream);
 #endif
     } else {
 #ifdef FLASHMASK_SM8X_V2_BUILD
-      run_mha_fwd_<86, cutlass::bfloat16_t, 128, 128, false, false, false, false>(params, stream);
+      run_sm8x_mha_fwd<cutlass::bfloat16_t, 128>(params, stream, arch);
 #else
       run_mha_fwd_<90, cutlass::bfloat16_t, 128, 128, false, false, false, false>(params, stream);
 #endif
@@ -373,13 +386,13 @@ std::vector<at::Tensor> flashmask_fwd_cuda(
   } else {
     if (rounded_head_dim == 96) {
 #ifdef FLASHMASK_SM8X_V2_BUILD
-      run_mha_fwd_<86, cutlass::half_t, 96, 96, false, false, false, false>(params, stream);
+      run_sm8x_mha_fwd<cutlass::half_t, 96>(params, stream, arch);
 #else
       run_mha_fwd_<90, cutlass::half_t, 96, 96, false, false, false, false>(params, stream);
 #endif
     } else {
 #ifdef FLASHMASK_SM8X_V2_BUILD
-      run_mha_fwd_<86, cutlass::half_t, 128, 128, false, false, false, false>(params, stream);
+      run_sm8x_mha_fwd<cutlass::half_t, 128>(params, stream, arch);
 #else
       run_mha_fwd_<90, cutlass::half_t, 128, 128, false, false, false, false>(params, stream);
 #endif

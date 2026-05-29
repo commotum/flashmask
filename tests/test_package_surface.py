@@ -557,6 +557,10 @@ def test_setup_declares_experimental_sm90_kernel_build_surface():
     assert "dense forward path" not in setup_text
     assert "FLASHMASK_BUILD_EXPERIMENTAL_SM8X_CUDA" in setup_text
     assert "FLASHMASK_SM8X_V2_BUILD=1" in setup_text
+    assert "flash_fwd_hdim96_bf16_sm80.cu" in setup_text
+    assert "flash_fwd_hdim96_fp16_sm80.cu" in setup_text
+    assert "flash_fwd_hdim128_bf16_sm80.cu" in setup_text
+    assert "flash_fwd_hdim128_fp16_sm80.cu" in setup_text
     assert "flash_fwd_hdim96_bf16_sm86.cu" in setup_text
     assert "flash_fwd_hdim96_fp16_sm86.cu" in setup_text
     assert "flash_fwd_hdim128_bf16_sm86.cu" in setup_text
@@ -566,6 +570,28 @@ def test_setup_declares_experimental_sm90_kernel_build_surface():
     assert "code=sm_80" in setup_text
     assert "compute_86" in setup_text
     assert "code=sm_86" in setup_text
+
+
+def test_sm8x_instantiations_include_sm80_and_sm86_dispatch_targets():
+    root = Path(__file__).resolve().parents[1]
+    instantiation_dir = (
+        root / "src" / "flashmask" / "csrc" / "flashmask_v2" / "instantiations"
+    )
+    for sm in ("80", "86"):
+        for head_dim in ("96", "128"):
+            for dtype in ("bf16", "fp16"):
+                path = instantiation_dir / f"flash_fwd_hdim{head_dim}_{dtype}_sm{sm}.cu"
+                text = path.read_text()
+                assert f"    {sm}," in text
+                assert f"    {head_dim}," in text
+
+    wrapper_text = (
+        root / "src" / "flashmask" / "csrc" / "flashmask_experimental.cu"
+    ).read_text()
+    assert "arch == 80 || arch == 86" in wrapper_text
+    assert "run_sm8x_mha_fwd" in wrapper_text
+    assert "run_mha_fwd_<80, T, kHeadDim" in wrapper_text
+    assert "run_mha_fwd_<86, T, kHeadDim" in wrapper_text
 
 
 def test_setup_normal_metadata_does_not_import_torch(tmp_path):
