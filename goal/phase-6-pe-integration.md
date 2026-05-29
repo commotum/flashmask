@@ -22,6 +22,37 @@ PE integration proof should be strict for the available SM86/SM8x backend. PE
 should expose SM90/Hopper aliases and artifact fields only as a fail-closed
 template path until the standalone FlashMask SM90 proof has passed on Hopper.
 
+## Phase 5 Handoff
+
+Phase 5 completion evidence is recorded in
+`/home/jake/Developer/flashmask/goal/phase-5-completion-audit.md`.
+
+The standalone package now exposes one public routed API:
+
+```text
+public request: backend="auto"
+local selected backend: fa2-compatible
+backend kind: sm8x_sparse_fa2_compatible
+device: SM86, compute capability 8.6
+forward: verified
+backward: verified
+training: verified through PE tiny training and GPU parity tests
+```
+
+PE already has the Phase 5 adapter shape:
+
+- `components.attention.FLASHMASK_BACKEND = "flashmask"`
+- package backend mapping: `flashmask -> auto`
+- explicit proof/diagnostic alias: `flashmask-fa2-compatible -> fa2-compatible`
+- explicit proof/diagnostic alias: `flashmask-fa3 -> fa3`
+- benchmark/proof artifacts record `requested_backend`, `selected_backend`,
+  `backend_kind`, capability, and forward/backward readiness.
+
+Phase 6 should use the plain PE backend name `flashmask` for normal PE
+training/eval integration. Explicit `flashmask-fa2-compatible` and
+`flashmask-fa3` should remain available for hardware proof, diagnostics, and
+negative routing tests, not as the default PE policy.
+
 ## Non-Goals
 
 - Do not put PE experiment policy into `flashmask`.
@@ -94,6 +125,12 @@ Expected PE-side adapter points:
 PE should not call raw `torch.ops.flashmask.*` directly except in low-level
 tests. Normal PE code should use the public Python FlashMask API.
 
+After Phase 5, any remaining Phase 6 work should audit and complete PE
+end-to-end usage rather than rebuild the router. In particular, check that
+training, eval, sampler rollout, and benchmark code prefer `flashmask` for the
+public path and only use explicit aliases where an architecture-specific proof
+is being requested.
+
 ## Full-Sequence Mask Integration
 
 For standard next-state training/eval batches, PE provides:
@@ -150,6 +187,7 @@ FlashMask backend:
 
 - accepts only `flashmask.IntervalMask` or PE metadata that compiles into one
 - calls `flashmask.flashmask_attention`
+- uses PE `flashmask` -> package `backend="auto"` for the normal public route
 - records selected FlashMask backend info when needed
 - does not use dense boolean masks as a fallback
 
@@ -160,10 +198,15 @@ If FlashMask is requested and unavailable, PE should fail clearly.
 Before training starts with a FlashMask backend, PE must verify:
 
 ```python
-flashmask.verify_backend(backend="auto", require_backward=True)
+flashmask.verify_backend(
+    backend=attention.flashmask_package_backend(pe_backend),
+    require_backward=True,
+)
 ```
 
-or the equivalent explicit backend request.
+For the normal PE backend `flashmask`, this verifies package `backend="auto"`.
+For explicit proof aliases, this verifies the corresponding explicit package
+backend request.
 
 Training should fail before the first optimizer step if:
 
@@ -260,16 +303,28 @@ All errors should explain the PE-side action or FlashMask build requirement.
 
 ## Test Commands
 
-CPU-safe PE tests:
+Focused PE tests:
 
 ```bash
-PYTHONPATH=/home/jake/Developer/flashmask/src uv run pytest -q tests/test_attention.py tests/test_batch.py tests/test_train.py
+PYTHONPATH=/home/jake/Developer/flashmask/src uv run --extra gpu pytest -q \
+  tests/test_attention.py \
+  tests/test_batch.py \
+  tests/test_train.py \
+  tests/test_flashmask_verification_gates.py
 ```
 
 GPU PE parity tests, hard-gated by backend:
 
 ```bash
-PE_REQUIRE_FLASHMASK_SM8X=1 PYTHONPATH=/home/jake/Developer/flashmask/src uv run --extra gpu pytest -q tests/test_flashmask_sm8x_gpu_parity.py
+PYTHONPATH=/home/jake/Developer/flashmask/src PE_REQUIRE_FLASHMASK_SM8X=1 uv run --extra gpu pytest -q \
+  tests/test_train.py \
+  tests/test_flashmask_sm8x_gpu_parity.py
+```
+
+Broader PE regression suite:
+
+```bash
+PYTHONPATH=/home/jake/Developer/flashmask/src uv run --extra gpu pytest -q
 ```
 
 Deferred Hopper PE parity command:
