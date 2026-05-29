@@ -143,7 +143,23 @@ def experimental_include_dirs() -> list[str]:
                 str(Path(cutlass_home) / "tools" / "util" / "include"),
             ]
         )
+    require_cutlass_headers(include_dirs)
     return include_dirs
+
+
+def require_cutlass_headers(include_dirs: list[str]) -> None:
+    for include_dir in include_dirs:
+        path = Path(include_dir)
+        if (path / "cutlass" / "cutlass.h").exists() and (
+            path / "cute" / "tensor.hpp"
+        ).exists():
+            return
+    raise RuntimeError(
+        "FlashMask experimental CUDA builds require CUTLASS/CUTE headers. "
+        "Set CUTLASS_HOME=/path/to/cutlass, "
+        "CUTLASS_INCLUDE_DIR=/path/to/cutlass/include, or "
+        "FLASHMASK_CUTLASS_INCLUDE_DIR=/path/to/cutlass/include."
+    )
 
 
 def stub_sources() -> list[str]:
@@ -217,7 +233,6 @@ def extension_modules():
     if mode is None:
         return [], {}
 
-    BuildExtension, CUDAExtension = load_torch_extension(mode)
     if mode == "experimental":
         sources = experimental_sources()
         extra_compile_args = experimental_compile_args()
@@ -231,6 +246,7 @@ def extension_modules():
         extra_compile_args = stub_compile_args()
         include_dirs = []
 
+    BuildExtension, CUDAExtension = load_torch_extension(mode)
     return [
         CUDAExtension(
             name="flashmask._C",

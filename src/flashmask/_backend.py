@@ -53,7 +53,11 @@ def extension_status() -> ExtensionStatus:
     except Exception as exc:
         reason = str(exc)
         if "flashmask._C" in reason:
-            reason = "FlashMask sparse FA3 kernels are not implemented"
+            reason = (
+                "FlashMask optional CUDA extension flashmask._C is not built; "
+                "pure Python installs provide mask construction and dense "
+                "reference helpers only"
+            )
         return ExtensionStatus(
             loaded=False,
             kernel_ready=False,
@@ -251,10 +255,16 @@ def _prepare_sparse_attention_call(
         or status.backend_kind != backend_kind
     ):
         raise NotImplementedError(
-            status.unavailable_reason or f"FlashMask sparse backend {backend_kind!r} is not available"
+            _format_extension_failure(status, backend_kind=backend_kind)
         )
     if require_backward and not status.backward_ready:
-        raise NotImplementedError(f"FlashMask sparse backend {backend_kind!r} does not support backward")
+        raise NotImplementedError(
+            _format_extension_failure(
+                status,
+                backend_kind=backend_kind,
+                require_backward=True,
+            )
+        )
     _validate_interval_mask_call(q, mask, causal)
 
     import torch
@@ -267,6 +277,56 @@ def _prepare_sparse_attention_call(
 
     scale = float("nan") if softmax_scale is None else float(softmax_scale)
     return torch, startend, block_mask, scale, bool(mask.causal if causal is None else causal)
+
+
+def _build_hint_for_backend_kind(backend_kind: str | None) -> str:
+    if backend_kind == SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND:
+        return (
+            "build_hint=FLASHMASK_BUILD_EXPERIMENTAL_SM8X_CUDA=1 "
+            "CUTLASS_HOME=/path/to/cutlass uv pip install -e . "
+            "--no-build-isolation -v"
+        )
+    if backend_kind == SPARSE_SM90_FA3_BACKEND_KIND:
+        return (
+            "build_hint=FLASHMASK_BUILD_EXPERIMENTAL_CUDA=1 "
+            "CUTLASS_INCLUDE_DIR=/path/to/cutlass/include uv pip install -e . "
+            "--no-build-isolation -v"
+        )
+    return (
+        "build_hint=FLASHMASK_BUILD_CUDA=1 builds the stub extension; "
+        "FLASHMASK_BUILD_EXPERIMENTAL_SM8X_CUDA=1 builds the current SM8x "
+        "sparse backend"
+    )
+
+
+def _format_extension_failure(
+    status: ExtensionStatus,
+    *,
+    backend_kind: str | None,
+    require_backward: bool = False,
+) -> str:
+    summary = (
+        "FlashMask sparse backend backward is unavailable"
+        if require_backward
+        else "FlashMask sparse backend is unavailable"
+    )
+    reason = status.unavailable_reason or "compiled extension did not report a ready sparse kernel"
+    return "; ".join(
+        [
+            summary,
+            f"requested_backend_kind={backend_kind!r}",
+            f"compiled_backend_kind={status.backend_kind!r}",
+            f"loaded={status.loaded}",
+            f"kernel_ready={status.kernel_ready}",
+            f"forward_ready={status.forward_ready}",
+            f"backward_ready={status.backward_ready}",
+            f"cuda_available={status.cuda_available}",
+            f"compute_capability={status.compute_capability}",
+            f"supported_compute_capabilities={status.supported_compute_capabilities}",
+            f"reason={reason}",
+            _build_hint_for_backend_kind(backend_kind),
+        ]
+    )
 
 
 def _flashmask_attention_autograd_function(torch: Any) -> Any:
@@ -324,6 +384,13 @@ def _flashmask_attention_autograd_function(torch: Any) -> Any:
 
 
 def _validate_interval_mask_call(q: Any, mask: IntervalMask, causal: bool | None) -> None:
+    if not isinstance(mask, IntervalMask):
+        raise TypeError(
+            "flashmask_attention requires an IntervalMask; dense boolean or "
+            "additive masks are not accepted by the sparse backend. Use "
+            "compile_dense_bool_mask(...) when the dense mask is representable, "
+            "or dense reference helpers for tests only."
+        )
     if causal is not None and bool(causal) != mask.causal:
         raise ValueError("causal override does not match IntervalMask.causal")
 

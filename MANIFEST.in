@@ -1,4 +1,8 @@
 recursive-include src/flashmask/csrc *
+global-exclude *.py[cod]
+global-exclude __pycache__
+prune src/flashmask/__pycache__
+prune src/flashmask/csrc/flashmask_v2/__pycache__
 prune context
 prune documentation
 prune paper

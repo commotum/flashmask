@@ -8,6 +8,7 @@ from typing import Any
 from ._backend import (
     SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
     SPARSE_SM90_FA3_BACKEND_KIND,
+    _build_hint_for_backend_kind,
     extension_status,
     sparse_attention_forward,
     sparse_attention_forward_with_backward,
@@ -273,15 +274,31 @@ def verify_backend(
 
     info = backend_info(backend=backend)
     if not info.available:
-        raise RuntimeError(info.unavailable_reason or f"backend {backend!r} is unavailable")
+        raise RuntimeError(
+            _format_backend_failure(
+                info,
+                info.unavailable_reason or f"backend {backend!r} is unavailable",
+            )
+        )
     if require_forward and not info.forward_ready:
-        raise RuntimeError(f"backend {backend!r} does not support forward")
+        raise RuntimeError(
+            _format_backend_failure(info, f"backend {backend!r} does not support forward")
+        )
     if require_fa3 and not info.is_fa3:
-        raise RuntimeError(f"backend {backend!r} is not FA3-compatible")
+        raise RuntimeError(
+            _format_backend_failure(info, f"backend {backend!r} is not FA3-compatible")
+        )
     if require_sparse and not info.supports_sparse_mask:
-        raise RuntimeError(f"backend {backend!r} does not support sparse FlashMask metadata")
+        raise RuntimeError(
+            _format_backend_failure(
+                info,
+                f"backend {backend!r} does not support sparse FlashMask metadata",
+            )
+        )
     if require_backward and not info.supports_backward:
-        raise RuntimeError(f"backend {backend!r} does not support backward")
+        raise RuntimeError(
+            _format_backend_failure(info, f"backend {backend!r} does not support backward")
+        )
     return info
 
 
@@ -307,6 +324,14 @@ def flashmask_attention(
     if causal is not None and is_causal is not None and bool(causal) != bool(is_causal):
         raise ValueError("causal and is_causal disagree")
     causal_override = causal if causal is not None else is_causal
+
+    if not isinstance(mask, IntervalMask):
+        raise TypeError(
+            "flashmask_attention requires an IntervalMask; dense boolean or "
+            "additive masks are not accepted by the sparse backend. Use "
+            "compile_dense_bool_mask(...) when the dense mask is representable, "
+            "or dense reference helpers for tests only."
+        )
 
     status = extension_status()
     resolution = _resolve_backend(str(backend), status)
@@ -369,6 +394,22 @@ def _validate_experimental_forward_limits(q: Any, k: Any, v: Any, block_mask: An
     if len(q_shape) != 4 or len(k_shape) != 4 or len(v_shape) != 4:
         return
 
+    dtype_names = {
+        "q": _dtype_name(q),
+        "k": _dtype_name(k),
+        "v": _dtype_name(v),
+    }
+    present_dtypes = {name: dtype for name, dtype in dtype_names.items() if dtype is not None}
+    if len(set(present_dtypes.values())) > 1:
+        details = ", ".join(f"{name}_dtype={dtype!r}" for name, dtype in present_dtypes.items())
+        raise NotImplementedError(f"FlashMask experimental forward requires matching Q/K/V dtypes; {details}")
+    for tensor_name, dtype_name in present_dtypes.items():
+        if not _supported_attention_dtype(dtype_name):
+            raise NotImplementedError(
+                "FlashMask experimental forward supports fp16/bf16 only; "
+                f"{tensor_name}_dtype={dtype_name!r}"
+            )
+
     if q_shape[2] != k_shape[2] or k_shape[2] != v_shape[2]:
         raise NotImplementedError("FlashMask experimental forward does not support native GQA yet")
     if q_shape[3] > 128:
@@ -388,6 +429,37 @@ def _shape_tuple(tensor: Any) -> tuple[int, ...] | None:
         except TypeError:
             return None
     return None
+
+
+def _dtype_name(tensor: Any) -> str | None:
+    dtype = getattr(tensor, "dtype", None)
+    if dtype is None:
+        return None
+    return str(dtype).replace("torch.", "")
+
+
+def _supported_attention_dtype(dtype_name: str) -> bool:
+    return dtype_name in {"float16", "bfloat16", "half"}
+
+
+def _format_backend_failure(info: BackendInfo, problem: str) -> str:
+    requested_kind = _backend_kind_for_name(info.selected_backend or info.requested_backend or "")
+    backend_kind_for_hint = requested_kind or info.backend_kind
+    fields = [
+        problem,
+        f"requested_backend={info.requested_backend!r}",
+        f"selected_backend={info.selected_backend!r}",
+        f"backend_kind={info.backend_kind!r}",
+        f"compute_capability={info.compute_capability}",
+        f"supported_compute_capabilities={info.supported_compute_capabilities}",
+        f"cuda_available={info.cuda_available}",
+        f"forward_ready={info.forward_ready}",
+        f"backward_ready={info.backward_ready}",
+    ]
+    if info.unavailable_reason and info.unavailable_reason not in problem:
+        fields.append(f"reason={info.unavailable_reason}")
+    fields.append(_build_hint_for_backend_kind(backend_kind_for_hint))
+    return "; ".join(fields)
 
 
 def dense_fallback_is_not_fast_path() -> None:

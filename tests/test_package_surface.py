@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import os
 import shutil
 import subprocess
@@ -96,11 +97,32 @@ def test_distribution_manifest_excludes_reference_material():
     pyproject_text = (root / "pyproject.toml").read_text()
 
     assert "recursive-include src/flashmask/csrc *" in manifest_text
+    assert "global-exclude *.py[cod]" in manifest_text
+    assert "global-exclude __pycache__" in manifest_text
     assert "include-package-data = false" in pyproject_text
     assert 'exclude = ["flashmask.csrc*"]' in pyproject_text
     for directory in ("context", "documentation", "paper", "sub", "tests", "uv-docs"):
         assert f"prune {directory}" in manifest_text
     assert "exclude summary_flashmask.md" in manifest_text
+
+
+def test_runtime_sources_do_not_import_reference_dependencies():
+    root = Path(__file__).resolve().parents[1]
+    runtime_root = root / "src" / "flashmask"
+    forbidden_roots = {"paddle", "paddlenlp", "sub"}
+
+    for path in runtime_root.rglob("*.py"):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            else:
+                continue
+            for name in names:
+                root_name = name.split(".", 1)[0]
+                assert root_name not in forbidden_roots, f"{path} imports {name}"
 
 
 def test_distribution_artifacts_have_expected_boundaries(tmp_path):
@@ -131,6 +153,8 @@ def test_distribution_artifacts_have_expected_boundaries(tmp_path):
         for names in (sdist_names, wheel_names):
             for name in names:
                 assert not (set(Path(name).parts) & forbidden_parts), name
+                assert "__pycache__" not in Path(name).parts, name
+                assert not name.endswith((".pyc", ".pyo")), name
                 assert "summary_flashmask" not in name
     finally:
         shutil.rmtree(root / "build", ignore_errors=True)
@@ -193,6 +217,55 @@ def test_sm90_benchmark_harness_is_lazy_and_scripted():
     assert "def _validate_args" in bench_text
     assert "def _mask_digest" in bench_text
     assert "torch.cuda.Event" in bench_text
+
+
+def test_readme_documents_current_sm86_phase7_proof_command():
+    root = Path(__file__).resolve().parents[1]
+    readme_text = (root / "README.md").read_text()
+
+    assert "artifacts/pe-flashmask-sm86-full.jsonl" in readme_text
+    assert "artifacts/pe-flashmask-sm86-rollout.jsonl" in readme_text
+    assert "artifacts/pe-flashmask-sm86.jsonl" in readme_text
+    assert "--backend fa2-compatible" in readme_text
+    assert "--min-speedup 1.5" in readme_text
+    assert "--require-case full --require-case rollout" in readme_text
+    assert "B=32" in readme_text
+    assert "Q=128" in readme_text
+    assert "K=3970" in readme_text
+    assert "Training speed is not claimed" in readme_text
+
+
+def test_readme_documents_phase8_standalone_contract():
+    root = Path(__file__).resolve().parents[1]
+    readme_text = (root / "README.md").read_text()
+
+    for phrase in (
+        "`flashmask` owns sparse interval masks",
+        "PE owns experiment",
+        "`ankos` owns CA mechanics",
+        "Paddle and PaddleNLP are reference material only",
+        "## Public API",
+        "compile_pe_state_causal_query_mask",
+        "flashmask_attention",
+        "verify_backend",
+        "The raw `torch.ops.flashmask.*` ABI is internal",
+        "## Build And Runtime Modes",
+        "Pure Python",
+        "FLASHMASK_BUILD_EXPERIMENTAL_SM8X_CUDA=1",
+        "SM80 remains fail-closed until A100 proof",
+        "fail-closed until H100/H200 proof",
+        "## Failure Modes",
+        "requested backend",
+        "selected backend",
+        "active compute capability",
+        "missing CUTLASS path",
+        "dense mask passed to the backend",
+        "## PE Integration",
+        "tests/test_flashmask_sm8x_gpu_parity.py",
+        "## Dependency And Artifact Hygiene",
+        "Runtime metadata declares no package dependencies",
+    ):
+        assert phrase in readme_text
 
 
 def test_sm90_benchmark_can_write_jsonl_artifact(tmp_path, capsys):
@@ -558,6 +631,7 @@ def test_setup_declares_experimental_sm90_kernel_build_surface():
     assert "compute_90a" in setup_text
     assert "dense forward path" not in setup_text
     assert "FLASHMASK_BUILD_EXPERIMENTAL_SM8X_CUDA" in setup_text
+    assert "require_cutlass_headers(include_dirs)" in setup_text
     assert "FLASHMASK_SM8X_V2_BUILD=1" in setup_text
     assert "flash_fwd_hdim96_bf16_sm80.cu" in setup_text
     assert "flash_fwd_hdim96_fp16_sm80.cu" in setup_text
@@ -664,6 +738,64 @@ def test_setup_cuda_build_modes_are_mutually_exclusive(tmp_path):
 
     assert result.returncode != 0
     assert "Set only one FlashMask CUDA build mode" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "build_env",
+    [
+        "FLASHMASK_BUILD_EXPERIMENTAL_CUDA",
+        "FLASHMASK_BUILD_EXPERIMENTAL_SM8X_CUDA",
+    ],
+)
+def test_setup_experimental_cuda_builds_require_cutlass_headers_before_torch_import(
+    tmp_path,
+    build_env,
+):
+    root = Path(__file__).resolve().parents[1]
+    (tmp_path / "setuptools.py").write_text("def setup(**kwargs): pass\n")
+    (tmp_path / "sitecustomize.py").write_text(
+        textwrap.dedent(
+            """
+            import builtins
+
+            _real_import = builtins.__import__
+
+            def _guarded_import(name, *args, **kwargs):
+                if name == "torch" or name.startswith("torch."):
+                    raise RuntimeError("blocked torch import")
+                return _real_import(name, *args, **kwargs)
+
+            builtins.__import__ = _guarded_import
+            """
+        )
+    )
+    env = os.environ.copy()
+    for name in (
+        "FLASHMASK_BUILD_CUDA",
+        "FLASHMASK_BUILD_EXPERIMENTAL_CUDA",
+        "FLASHMASK_BUILD_EXPERIMENTAL_SM8X_CUDA",
+        "FLASHMASK_CUTLASS_INCLUDE_DIR",
+        "CUTLASS_INCLUDE_DIR",
+        "CUTLASS_HOME",
+    ):
+        env.pop(name, None)
+    env[build_env] = "1"
+    pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = str(tmp_path) if not pythonpath else f"{tmp_path}{os.pathsep}{pythonpath}"
+
+    result = subprocess.run(
+        [sys.executable, "setup.py"],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "require CUTLASS/CUTE headers" in result.stderr
+    assert "CUTLASS_HOME=/path/to/cutlass" in result.stderr
+    assert "blocked torch import" not in result.stderr
 
 
 def test_extension_status_is_lazy():

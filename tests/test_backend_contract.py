@@ -23,6 +23,7 @@ class FakeTensor:
     shape: tuple[int, ...]
     device: str = "cuda"
     requires_grad: bool = False
+    dtype: str | None = None
 
 
 @dataclass(frozen=True)
@@ -112,6 +113,19 @@ def test_sparse_forward_rejects_query_length_mismatch(monkeypatch):
 
     with pytest.raises(ValueError, match="seqlen_q=5"):
         sparse_attention_forward(q, None, None, mask)
+
+
+def test_sparse_forward_rejects_dense_mask_with_actionable_message(monkeypatch):
+    _force_ready_backend(monkeypatch)
+    q = FakeTensor((1, 1, 1, 1))
+
+    with pytest.raises(TypeError) as exc_info:
+        sparse_attention_forward(q, q, q, [[[[True]]]])
+
+    message = str(exc_info.value)
+    assert "requires an IntervalMask" in message
+    assert "dense boolean or additive masks are not accepted" in message
+    assert "compile_dense_bool_mask" in message
 
 
 def test_sparse_forward_rejects_bounds_beyond_query_length(monkeypatch):
@@ -298,6 +312,60 @@ def test_flashmask_attention_requires_backward_for_grad_inputs_before_dispatch(
         flashmask.flashmask_attention(q, object(), object(), mask)
 
     assert calls == []
+
+
+def test_verify_backend_error_includes_actionable_context(monkeypatch):
+    monkeypatch.setattr(
+        attention_module,
+        "extension_status",
+        lambda: ExtensionStatus(
+            loaded=False,
+            kernel_ready=False,
+            unavailable_reason="forced unavailable",
+        ),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        flashmask.verify_backend(backend="fa2-compatible")
+
+    message = str(exc_info.value)
+    assert "requested_backend='fa2-compatible'" in message
+    assert "selected_backend='fa2-compatible'" in message
+    assert "backend_kind=None" in message
+    assert "compute_capability=None" in message
+    assert "forward_ready=False" in message
+    assert "backward_ready=False" in message
+    assert "FLASHMASK_BUILD_EXPERIMENTAL_SM8X_CUDA=1" in message
+
+
+def test_sparse_forward_error_includes_extension_context(monkeypatch):
+    monkeypatch.setattr(
+        backend_module,
+        "extension_status",
+        lambda: ExtensionStatus(
+            loaded=False,
+            kernel_ready=False,
+            unavailable_reason="forced unavailable",
+        ),
+    )
+    mask = flashmask.IntervalMask([[[[1]]]], causal=True, seqlen_q=1)
+    q = FakeTensor((1, 1, 1, 1))
+
+    with pytest.raises(NotImplementedError) as exc_info:
+        sparse_attention_forward(
+            q,
+            q,
+            q,
+            mask,
+            backend_kind=SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
+        )
+
+    message = str(exc_info.value)
+    assert "requested_backend_kind='sm8x_sparse_fa2_compatible'" in message
+    assert "compiled_backend_kind=None" in message
+    assert "kernel_ready=False" in message
+    assert "compute_capability=None" in message
+    assert "FLASHMASK_BUILD_EXPERIMENTAL_SM8X_CUDA=1" in message
 
 
 def test_flashmask_attention_sm90_public_route_requires_hopper_proof(monkeypatch):
@@ -537,6 +605,61 @@ def test_flashmask_attention_rejects_native_gqa_before_dispatch(monkeypatch):
             FakeTensor((1, 1, 2, 128)),
             mask,
         )
+
+
+def test_flashmask_attention_rejects_unsupported_dtype_before_dispatch(monkeypatch):
+    mask = flashmask.IntervalMask([[[[1]]]], causal=True, seqlen_q=1)
+
+    ready = lambda: ExtensionStatus(
+        loaded=True,
+        kernel_ready=True,
+        forward_ready=True,
+        backend_kind=SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
+        cuda_available=True,
+        compute_capability=(8, 6),
+        supported_compute_capabilities=((8, 0), (8, 6)),
+    )
+    monkeypatch.setattr(attention_module, "extension_status", ready)
+
+    with pytest.raises(NotImplementedError) as exc_info:
+        flashmask.flashmask_attention(
+            FakeTensor((1, 1, 1, 128), dtype="float32"),
+            FakeTensor((1, 1, 1, 128), dtype="float32"),
+            FakeTensor((1, 1, 1, 128), dtype="float32"),
+            mask,
+        )
+
+    message = str(exc_info.value)
+    assert "supports fp16/bf16 only" in message
+    assert "q_dtype='float32'" in message
+
+
+def test_flashmask_attention_rejects_mismatched_dtypes_before_dispatch(monkeypatch):
+    mask = flashmask.IntervalMask([[[[1]]]], causal=True, seqlen_q=1)
+
+    ready = lambda: ExtensionStatus(
+        loaded=True,
+        kernel_ready=True,
+        forward_ready=True,
+        backend_kind=SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
+        cuda_available=True,
+        compute_capability=(8, 6),
+        supported_compute_capabilities=((8, 0), (8, 6)),
+    )
+    monkeypatch.setattr(attention_module, "extension_status", ready)
+
+    with pytest.raises(NotImplementedError) as exc_info:
+        flashmask.flashmask_attention(
+            FakeTensor((1, 1, 1, 128), dtype="float16"),
+            FakeTensor((1, 1, 1, 128), dtype="bfloat16"),
+            FakeTensor((1, 1, 1, 128), dtype="float16"),
+            mask,
+        )
+
+    message = str(exc_info.value)
+    assert "requires matching Q/K/V dtypes" in message
+    assert "q_dtype='float16'" in message
+    assert "k_dtype='bfloat16'" in message
 
 
 def test_flashmask_attention_rejects_unsupported_head_dim_before_dispatch(monkeypatch):
