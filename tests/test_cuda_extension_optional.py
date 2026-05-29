@@ -49,7 +49,7 @@ def test_compiled_extension_device_gate_when_present():
             tuple(capability) == (9, 0)
             and backend_kind == flashmask.SPARSE_SM90_FA3_BACKEND_KIND
         ) or (
-            capability[0] == 8
+            tuple(capability) == (8, 6)
             and backend_kind == flashmask.SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND
         )
 
@@ -139,8 +139,8 @@ def _require_sm8x_raw_op():
     import flashmask._C as extension
 
     capability = torch.cuda.get_device_capability()
-    if capability[0] != 8 or not bool(extension.kernel_ready()):
-        _require_or_skip("FlashMask SM8x sparse forward requires a compute capability 8.x CUDA device")
+    if tuple(capability) != (8, 6) or not bool(extension.kernel_ready()):
+        _require_or_skip("FlashMask SM8x sparse forward requires an SM86 / compute capability 8.6 CUDA device")
     if extension.backend_kind() != flashmask.SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND:
         _require_or_skip("compiled FlashMask extension is not the SM8x sparse backend")
     return torch
@@ -189,6 +189,53 @@ def test_optional_sm8x_raw_op_matches_pe_dense_reference(dtype_name):
     rtol = 6e-2 if dtype == torch.bfloat16 else 3e-2
     torch.testing.assert_close(out.float(), expected_out, atol=atol, rtol=rtol)
     torch.testing.assert_close(lse.float(), expected_lse, atol=atol, rtol=rtol)
+
+
+def test_optional_sm8x_pe_backward_path_fails_closed():
+    torch = _require_sm8x_raw_op()
+
+    import flashmask._C as extension
+
+    assert bool(extension.backward_ready()) is False
+
+    generator = torch.Generator(device="cuda").manual_seed(87)
+    q = torch.randn(
+        1, 6, 2, 64, device="cuda", dtype=torch.float16, generator=generator
+    )
+    k = torch.randn(
+        1, 6, 2, 64, device="cuda", dtype=torch.float16, generator=generator
+    )
+    v = torch.randn(
+        1, 6, 2, 64, device="cuda", dtype=torch.float16, generator=generator
+    )
+    out = torch.randn_like(q)
+    dout = torch.randn_like(out)
+    softmax_lse = torch.randn(
+        1, 2, 6, device="cuda", dtype=torch.float32, generator=generator
+    )
+    mask = flashmask.compile_pe_state_causal_mask(
+        token_type_id=[[1, 2, 3, 3, 3, 3]],
+        time_index=[[-1, -1, 0, 0, 1, 2]],
+        valid_token=[[True, True, True, True, True, True]],
+        mask_heads=1,
+    )
+    startend = torch.as_tensor(mask.to_list(), device="cuda", dtype=torch.int32)
+    block_mask = torch.empty(0, device="cuda", dtype=torch.int32)
+
+    with pytest.raises(RuntimeError, match="backward kernel is not implemented"):
+        torch.ops.flashmask.bwd(
+            dout,
+            q,
+            k,
+            v,
+            out,
+            softmax_lse,
+            startend,
+            block_mask,
+            float("nan"),
+            mask.causal,
+            False,
+        )
 
 
 @pytest.mark.parametrize(

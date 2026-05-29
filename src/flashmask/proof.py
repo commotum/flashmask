@@ -1,4 +1,4 @@
-"""Dependency-free validation for SM90 FlashMask proof artifacts."""
+"""Dependency-free validation for FlashMask benchmark proof artifacts."""
 
 from __future__ import annotations
 
@@ -10,12 +10,40 @@ from pathlib import Path
 from typing import Any
 
 
-SPARSE_FA3_BACKEND_KIND = "sm90_sparse_fa3"
-REQUIRED_FLASHMASK_CUDA_KERNEL_MARKERS = (
+SPARSE_SM90_FA3_BACKEND_KIND = "sm90_sparse_fa3"
+SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND = "sm8x_sparse_fa2_compatible"
+SPARSE_FA3_BACKEND_KIND = SPARSE_SM90_FA3_BACKEND_KIND
+REQUIRED_FLASHMASK_SM90_CUDA_KERNEL_MARKERS = (
     "prepare_flashmask_kernel",
     "scanMaxMinChunkedKernel",
     "cutlass_flashmask_kernel",
 )
+REQUIRED_FLASHMASK_SM8X_CUDA_KERNEL_MARKERS = (
+    "scanMaxMinChunkedKernel",
+    "cutlass_flashmask_kernel",
+)
+REQUIRED_FLASHMASK_CUDA_KERNEL_MARKERS = REQUIRED_FLASHMASK_SM90_CUDA_KERNEL_MARKERS
+
+PROOF_BACKEND_SPECS = {
+    "sm90": {
+        "label": "SM90",
+        "capability": [9, 0],
+        "backend_kind": SPARSE_SM90_FA3_BACKEND_KIND,
+        "backend_names": ("fa3", "flashmask-fa3"),
+        "cuda_kernel_markers": REQUIRED_FLASHMASK_SM90_CUDA_KERNEL_MARKERS,
+    },
+    "sm86": {
+        "label": "SM86",
+        "capability": [8, 6],
+        "backend_kind": SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
+        "backend_names": ("fa2-compatible", "flashmask-fa2-compatible"),
+        "cuda_kernel_markers": REQUIRED_FLASHMASK_SM8X_CUDA_KERNEL_MARKERS,
+    },
+}
+PROOF_BACKEND_ALIASES = {
+    "fa3": "sm90",
+    "fa2-compatible": "sm86",
+}
 
 
 class ProofValidationError(ValueError):
@@ -43,6 +71,47 @@ def validate_sm90_proof_jsonl(
     return records
 
 
+def validate_sm86_proof_jsonl(
+    paths: list[str | Path],
+    *,
+    min_speedup: float,
+    required_cases: set[str] | None = None,
+    require_speedup: bool = True,
+) -> list[dict[str, Any]]:
+    """Load and validate one or more SM86 proof JSONL files."""
+
+    return validate_proof_jsonl(
+        paths,
+        backend="sm86",
+        min_speedup=min_speedup,
+        required_cases=required_cases,
+        require_speedup=require_speedup,
+    )
+
+
+def validate_proof_jsonl(
+    paths: list[str | Path],
+    *,
+    backend: str = "sm90",
+    min_speedup: float,
+    required_cases: set[str] | None = None,
+    require_speedup: bool = True,
+) -> list[dict[str, Any]]:
+    """Load and validate one or more backend-specific proof JSONL files."""
+
+    records: list[dict[str, Any]] = []
+    for path in paths:
+        records.extend(_read_jsonl(Path(path)))
+    validate_proof_records(
+        records,
+        backend=backend,
+        min_speedup=min_speedup,
+        required_cases=required_cases,
+        require_speedup=require_speedup,
+    )
+    return records
+
+
 def validate_sm90_proof_records(
     records: list[dict[str, Any]],
     *,
@@ -52,6 +121,44 @@ def validate_sm90_proof_records(
 ) -> None:
     """Validate parsed benchmark records as real SM90 sparse-kernel proof."""
 
+    validate_proof_records(
+        records,
+        backend="sm90",
+        min_speedup=min_speedup,
+        required_cases=required_cases,
+        require_speedup=require_speedup,
+    )
+
+
+def validate_sm86_proof_records(
+    records: list[dict[str, Any]],
+    *,
+    min_speedup: float,
+    required_cases: set[str] | None = None,
+    require_speedup: bool = True,
+) -> None:
+    """Validate parsed benchmark records as real SM86 sparse-kernel proof."""
+
+    validate_proof_records(
+        records,
+        backend="sm86",
+        min_speedup=min_speedup,
+        required_cases=required_cases,
+        require_speedup=require_speedup,
+    )
+
+
+def validate_proof_records(
+    records: list[dict[str, Any]],
+    *,
+    backend: str = "sm90",
+    min_speedup: float,
+    required_cases: set[str] | None = None,
+    require_speedup: bool = True,
+) -> None:
+    """Validate parsed benchmark records as real sparse-kernel proof."""
+
+    spec = _proof_backend_spec(backend)
     if not records:
         raise ProofValidationError("proof artifact contains no records")
     if min_speedup <= 0:
@@ -60,7 +167,7 @@ def validate_sm90_proof_records(
     seen_cases: set[str] = set()
     speedup_records = 0
     for index, record in enumerate(records):
-        _validate_record(index, record, min_speedup=min_speedup)
+        _validate_record(index, record, min_speedup=min_speedup, spec=spec)
         case = record.get("case")
         if isinstance(case, str):
             seen_cases.add(case)
@@ -78,7 +185,13 @@ def validate_sm90_proof_records(
             )
 
 
-def _validate_record(index: int, record: dict[str, Any], *, min_speedup: float) -> None:
+def _validate_record(
+    index: int,
+    record: dict[str, Any],
+    *,
+    min_speedup: float,
+    spec: dict[str, Any],
+) -> None:
     prefix = f"record {index}"
     if not isinstance(record, dict):
         raise ProofValidationError(f"{prefix}: expected JSON object")
@@ -86,13 +199,25 @@ def _validate_record(index: int, record: dict[str, Any], *, min_speedup: float) 
         raise ProofValidationError(f"{prefix}: status is not ok")
     if record.get("passed") is not True:
         raise ProofValidationError(f"{prefix}: passed is not true")
-    if record.get("capability") != [9, 0]:
-        raise ProofValidationError(f"{prefix}: capability is not [9, 0]")
-    if record.get("backend_kind") != SPARSE_FA3_BACKEND_KIND:
-        raise ProofValidationError(f"{prefix}: backend_kind is not {SPARSE_FA3_BACKEND_KIND}")
+    expected_capability = spec["capability"]
+    if record.get("capability") != expected_capability:
+        raise ProofValidationError(f"{prefix}: capability is not {expected_capability}")
+    expected_backend_kind = spec["backend_kind"]
+    if record.get("backend_kind") != expected_backend_kind:
+        raise ProofValidationError(f"{prefix}: backend_kind is not {expected_backend_kind}")
     backend = record.get("backend")
-    if backend not in ("fa3", "flashmask-fa3"):
-        raise ProofValidationError(f"{prefix}: backend is not fa3 or flashmask-fa3")
+    backend_names = tuple(spec["backend_names"])
+    if backend not in backend_names:
+        raise ProofValidationError(
+            f"{prefix}: backend is not one of {', '.join(backend_names)}"
+        )
+    requested_backend = record.get("requested_backend")
+    if requested_backend is None:
+        raise ProofValidationError(f"{prefix}: requested_backend is missing")
+    if requested_backend not in backend_names:
+        raise ProofValidationError(
+            f"{prefix}: requested_backend is not one of {', '.join(backend_names)}"
+        )
     if record.get("kernel_ready") is not True:
         raise ProofValidationError(f"{prefix}: kernel_ready is not true")
     if record.get("forward_ready") is not True:
@@ -106,10 +231,21 @@ def _validate_record(index: int, record: dict[str, Any], *, min_speedup: float) 
     if record.get("profiler_missing_flashmask_cuda_kernel_markers") not in ([], ()):
         raise ProofValidationError(f"{prefix}: required FlashMask CUDA kernel markers are missing")
 
+    expected_markers = tuple(spec["cuda_kernel_markers"])
+    recorded_required_markers = record.get("required_flashmask_cuda_kernel_markers")
+    if recorded_required_markers is None:
+        raise ProofValidationError(
+            f"{prefix}: required FlashMask CUDA kernel marker list is missing"
+        )
+    if tuple(recorded_required_markers) != expected_markers:
+        raise ProofValidationError(
+            f"{prefix}: required FlashMask CUDA kernel marker list does not match backend"
+        )
+
     kernel_events = record.get("profiler_flashmask_cuda_kernel_events")
     if not isinstance(kernel_events, list):
         raise ProofValidationError(f"{prefix}: CUDA kernel event list is missing")
-    for marker in REQUIRED_FLASHMASK_CUDA_KERNEL_MARKERS:
+    for marker in expected_markers:
         if not any(marker in str(event) for event in kernel_events):
             raise ProofValidationError(f"{prefix}: missing CUDA kernel event marker {marker}")
 
@@ -141,9 +277,11 @@ def _validate_parity_tolerances(prefix: str, record: dict[str, Any]) -> None:
     if atol < 0 or rtol < 0:
         raise ProofValidationError(f"{prefix}: parity tolerances must be non-negative")
 
+    found_parity_pair = False
     if "max_abs_error" in record or "max_rel_error" in record:
         if "max_abs_error" not in record or "max_rel_error" not in record:
             raise ProofValidationError(f"{prefix}: PE parity abs/rel metrics are incomplete")
+        found_parity_pair = True
         _validate_abs_rel_pair(
             prefix,
             "max_abs_error",
@@ -160,6 +298,7 @@ def _validate_parity_tolerances(prefix: str, record: dict[str, Any]) -> None:
         if abs_name in record or rel_name in record:
             if abs_name not in record or rel_name not in record:
                 raise ProofValidationError(f"{prefix}: {label} parity abs/rel metrics are incomplete")
+            found_parity_pair = True
             _validate_abs_rel_pair(
                 prefix,
                 abs_name,
@@ -169,6 +308,8 @@ def _validate_parity_tolerances(prefix: str, record: dict[str, Any]) -> None:
                 atol,
                 rtol,
             )
+    if not found_parity_pair:
+        raise ProofValidationError(f"{prefix}: parity metrics are missing")
 
 
 def _validate_abs_rel_pair(
@@ -218,27 +359,45 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return records
 
 
+def _proof_backend_spec(backend: str) -> dict[str, Any]:
+    backend = PROOF_BACKEND_ALIASES.get(backend, backend)
+    try:
+        return PROOF_BACKEND_SPECS[backend]
+    except KeyError as exc:
+        supported = ", ".join(sorted(PROOF_BACKEND_SPECS))
+        raise ProofValidationError(f"unsupported proof backend {backend!r}; expected one of {supported}") from exc
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Validate FlashMask SM90 benchmark JSONL artifacts."
+        description="Validate FlashMask benchmark JSONL artifacts."
     )
     parser.add_argument("jsonl", nargs="+", help="JSONL artifact path")
+    parser.add_argument(
+        "--backend",
+        choices=tuple(sorted((*PROOF_BACKEND_SPECS, *PROOF_BACKEND_ALIASES))),
+        default="sm90",
+    )
     parser.add_argument("--min-speedup", type=float, required=True)
     parser.add_argument("--require-case", action="append", default=[])
     parser.add_argument("--no-require-speedup", action="store_true")
     args = parser.parse_args(argv)
 
     try:
-        records = validate_sm90_proof_jsonl(
+        records = validate_proof_jsonl(
             args.jsonl,
+            backend=args.backend,
             min_speedup=args.min_speedup,
             required_cases=set(args.require_case) if args.require_case else None,
             require_speedup=not args.no_require_speedup,
         )
     except ProofValidationError as exc:
-        print(f"FlashMask SM90 proof validation failed: {exc}", file=sys.stderr)
+        spec_key = PROOF_BACKEND_ALIASES.get(args.backend, args.backend)
+        label = PROOF_BACKEND_SPECS.get(spec_key, {}).get("label", args.backend)
+        print(f"FlashMask {label} proof validation failed: {exc}", file=sys.stderr)
         return 1
-    print(f"validated {len(records)} FlashMask SM90 proof records")
+    label = PROOF_BACKEND_SPECS[PROOF_BACKEND_ALIASES.get(args.backend, args.backend)]["label"]
+    print(f"validated {len(records)} FlashMask {label} proof records")
     return 0
 
 

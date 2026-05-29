@@ -150,6 +150,7 @@ def test_sm90_benchmark_harness_is_lazy_and_scripted():
     assert "def _import_torch():" in bench_text
     assert "import torch" not in bench_text.split("def _import_torch():", 1)[0]
     assert "\"backend\": \"fa3\"" in bench_text
+    assert "\"requested_backend\": \"fa3\"" in bench_text
     assert "\"forward_ready\"" in bench_text
     assert "dense_sdpa_ms" in bench_text
     assert "\"speedup\"" in bench_text
@@ -169,6 +170,7 @@ def test_sm90_benchmark_harness_is_lazy_and_scripted():
     assert "cutlass_flashmask_kernel" in bench_text
     assert "\"profiler_flashmask_cuda_kernel_events\"" in bench_text
     assert "\"profiler_missing_flashmask_cuda_kernel_markers\"" in bench_text
+    assert "\"required_flashmask_cuda_kernel_markers\"" in bench_text
     assert "scaled_dot_product_attention" in bench_text
     assert "\"profiler_dense_attention_events\"" in bench_text
     assert "\"profiler_flashmask_fwd\"" in bench_text
@@ -385,12 +387,13 @@ def test_cuda_backend_scaffold_declares_final_op_surface():
     assert experimental.exists()
 
 
-def test_cuda_backend_readiness_uses_exact_sm90_device_gate():
+def test_cuda_backend_readiness_uses_exact_device_gates():
     root = Path(__file__).resolve().parents[1]
     api_text = (root / "src" / "flashmask" / "csrc" / "flashmask_api.cpp").read_text()
     bench_text = (root / "src" / "flashmask" / "bench_sm90.py").read_text()
 
     assert "prop.major == 9 && prop.minor == 0" in api_text
+    assert "prop.major == 8 && prop.minor == 6" in api_text
     assert "tuple(capability) != (9, 0)" in bench_text
     assert "capability[0] != 9" not in bench_text
     assert "capability[0] == 9" not in bench_text
@@ -415,6 +418,38 @@ def test_experimental_forward_wrapper_is_sm90_gated():
     assert "validate_startend_debug(q, startend_row_indices, causal);" in experimental_text
     assert "must be on the same CUDA device as q" in experimental_text
     assert "block_mask yet" in experimental_text
+
+
+def test_sm90_fa3_static_path_requires_flashmask_metadata_dispatch():
+    root = Path(__file__).resolve().parents[1]
+    experimental_text = (
+        root / "src" / "flashmask" / "csrc" / "flashmask_experimental.cu"
+    ).read_text()
+    launch_text = (
+        root
+        / "src"
+        / "flashmask"
+        / "csrc"
+        / "flashmask_v2"
+        / "flash_fwd_launch_template.h"
+    ).read_text()
+
+    assert (
+        "set_startend_ptrs(params, startend_row_indices, causal, owned_bounds);"
+        in experimental_text
+    )
+    assert "BOOL_SWITCH(params.lt_start_ptr != nullptr, Is_flashmask" in launch_text
+    assert "Is_flashmask && !Is_FP8" in launch_text
+    assert (
+        "flash::flashmask::prepare_block_maxmin<kBlockN>"
+        "(params, scaled_seqlen_k, stream, true);"
+        in launch_text
+    )
+    assert (
+        "prepare_flashmask(params, stream, params.num_sm, Scheduler::pipelining);"
+        in launch_text
+    )
+    assert "CollectiveMainloopFwdSm90<" in launch_text
 
 
 def test_experimental_raw_op_sync_validation_is_debug_gated():
@@ -483,6 +518,13 @@ def test_sm80_sparse_path_threads_flashmask_metadata():
     assert "args.write_ptr" in mainloop_text
     assert "args.kv_chunk_size" in mainloop_text
     assert "cute::bool_constant<Is_flashmask>{} /*check_inf*/" in mainloop_text
+    assert "flashmask_previous_unmasked_n_block" in mainloop_text
+    assert "n_block = flashmask_previous_unmasked_n_block(n_block)" in mainloop_text
+    assert (
+        "next_n_block_to_load = flashmask_previous_unmasked_n_block(n_block - kStages)"
+        in mainloop_text
+    )
+    assert "for (; n_block >= n_block_min; n_block = next_n_block_to_load)" in mainloop_text
     assert (
         "CollectiveMainloopFwdSm80<kNWarps, kStages, Q_in_regs, TileShape_MNK,"
         in launch_text
@@ -509,7 +551,7 @@ def test_setup_declares_experimental_sm90_kernel_build_surface():
     assert "FLASHMASK_V2_DISABLE_HDIM192" in setup_text
     assert "FLASHMASK_V2_DISABLE_HDIM256" in setup_text
     assert "compute_90a" in setup_text
-    assert "dense forward path" in setup_text
+    assert "dense forward path" not in setup_text
     assert "FLASHMASK_BUILD_EXPERIMENTAL_SM8X_CUDA" in setup_text
     assert "FLASHMASK_SM8X_V2_BUILD=1" in setup_text
     assert "flash_fwd_hdim96_bf16_sm86.cu" in setup_text

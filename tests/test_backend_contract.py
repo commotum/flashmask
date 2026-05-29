@@ -14,6 +14,7 @@ from flashmask._backend import (
     SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
     SPARSE_SM90_FA3_BACKEND_KIND,
     sparse_attention_forward,
+    sparse_attention_forward_with_backward,
 )
 
 
@@ -257,7 +258,18 @@ def test_sparse_forward_caches_startend_tensor_per_device(monkeypatch):
     assert [call[0] for call in calls].count("fwd") == 2
 
 
-def test_flashmask_attention_requires_backward_for_grad_inputs_before_dispatch(monkeypatch):
+@pytest.mark.parametrize(
+    ("backend", "backend_kind"),
+    [
+        ("fa3", SPARSE_SM90_FA3_BACKEND_KIND),
+        ("fa2-compatible", SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND),
+    ],
+)
+def test_flashmask_attention_requires_backward_for_grad_inputs_before_dispatch(
+    monkeypatch,
+    backend,
+    backend_kind,
+):
     mask = flashmask.IntervalMask([[[[1]]]], causal=True, seqlen_q=1)
     q = FakeTensor((1, 1, 1, 1), requires_grad=True)
     calls = []
@@ -267,7 +279,7 @@ def test_flashmask_attention_requires_backward_for_grad_inputs_before_dispatch(m
         kernel_ready=True,
         forward_ready=True,
         backward_ready=False,
-        backend_kind="sm90_sparse_fa3",
+        backend_kind=backend_kind,
     )
     monkeypatch.setattr(attention_module, "extension_status", ready)
     monkeypatch.setattr(backend_module, "extension_status", ready)
@@ -283,9 +295,148 @@ def test_flashmask_attention_requires_backward_for_grad_inputs_before_dispatch(m
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
 
     with pytest.raises(NotImplementedError, match="does not support backward"):
-        flashmask.flashmask_attention(q, object(), object(), mask)
+        flashmask.flashmask_attention(q, object(), object(), mask, backend=backend)
 
     assert calls == []
+
+
+def test_sparse_attention_forward_with_backward_routes_autograd_to_bwd(monkeypatch):
+    mask = flashmask.IntervalMask([[[[1]]]], causal=True, seqlen_q=1)
+    q = FakeTensor((1, 1, 1, 1), requires_grad=True)
+    k = FakeTensor((1, 1, 1, 1), requires_grad=True)
+    v = FakeTensor((1, 1, 1, 1), requires_grad=True)
+    startend_tensor = object()
+    block_tensor = object()
+    out_tensor = object()
+    lse_tensor = object()
+    dout_tensor = object()
+    dq_tensor = object()
+    dk_tensor = object()
+    dv_tensor = object()
+    calls = []
+
+    ready = lambda: ExtensionStatus(
+        loaded=True,
+        kernel_ready=True,
+        forward_ready=True,
+        backward_ready=True,
+        backend_kind=SPARSE_SM90_FA3_BACKEND_KIND,
+    )
+    monkeypatch.setattr(backend_module, "extension_status", ready)
+
+    fake_torch = types.ModuleType("torch")
+    fake_torch.int32 = "int32"
+
+    def as_tensor(value, *, dtype, device):
+        calls.append(("as_tensor", value, dtype, device))
+        return startend_tensor
+
+    def empty(*shape, dtype, device):
+        calls.append(("empty", shape, dtype, device))
+        return block_tensor
+
+    class FakeFunction:
+        last_cls = None
+        last_ctx = None
+
+        @classmethod
+        def apply(cls, *args):
+            ctx = types.SimpleNamespace()
+            ctx.save_for_backward = lambda *tensors: setattr(ctx, "saved_tensors", tensors)
+            FakeFunction.last_cls = cls
+            FakeFunction.last_ctx = ctx
+            return cls.forward(ctx, *args)
+
+    class FakeFlashMaskOps:
+        def fwd(self, *args):
+            calls.append(("fwd", args))
+            return out_tensor, lse_tensor
+
+        def bwd(self, *args):
+            calls.append(("bwd", args))
+            return dq_tensor, dk_tensor, dv_tensor
+
+    fake_torch.as_tensor = as_tensor
+    fake_torch.empty = empty
+    fake_torch.autograd = types.SimpleNamespace(Function=FakeFunction)
+    fake_torch.ops = types.SimpleNamespace(flashmask=FakeFlashMaskOps())
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    output, lse = sparse_attention_forward_with_backward(
+        q,
+        k,
+        v,
+        mask,
+        softmax_scale=0.25,
+    )
+    grads = FakeFunction.last_cls.backward(FakeFunction.last_ctx, dout_tensor, None)
+
+    assert output is out_tensor
+    assert lse is lse_tensor
+    assert ("fwd", (q, k, v, startend_tensor, block_tensor, 0.25, True)) in calls
+    assert (
+        "bwd",
+        (
+            dout_tensor,
+            q,
+            k,
+            v,
+            out_tensor,
+            lse_tensor,
+            startend_tensor,
+            block_tensor,
+            0.25,
+            True,
+            False,
+        ),
+    ) in calls
+    assert grads == (dq_tensor, dk_tensor, dv_tensor, None, None, None, None, None)
+
+
+def test_flashmask_attention_uses_backward_surface_for_grad_inputs(monkeypatch):
+    mask = flashmask.IntervalMask([[[[1]]]], causal=True, seqlen_q=1)
+    q = FakeTensor((1, 1, 1, 1), requires_grad=True)
+    calls = []
+
+    ready = lambda: ExtensionStatus(
+        loaded=True,
+        kernel_ready=True,
+        forward_ready=True,
+        backward_ready=True,
+        backend_kind=SPARSE_SM90_FA3_BACKEND_KIND,
+    )
+    monkeypatch.setattr(attention_module, "extension_status", ready)
+    monkeypatch.setattr(backend_module, "extension_status", ready)
+
+    def fail_forward(*args, **kwargs):
+        raise AssertionError("grad-tracked FlashMask calls must use the backward surface")
+
+    def backward_forward(*args, **kwargs):
+        calls.append((args, kwargs))
+        return "out", "lse"
+
+    monkeypatch.setattr(attention_module, "sparse_attention_forward", fail_forward)
+    monkeypatch.setattr(
+        attention_module,
+        "sparse_attention_forward_with_backward",
+        backward_forward,
+    )
+
+    result = flashmask.flashmask_attention(q, q, q, mask, softmax_scale=0.5)
+
+    assert result.output == "out"
+    assert result.softmax_lse == "lse"
+    assert calls == [
+        (
+            (q, q, q, mask),
+            {
+                "softmax_scale": 0.5,
+                "block_mask": None,
+                "causal": None,
+                "backend_kind": SPARSE_SM90_FA3_BACKEND_KIND,
+            },
+        )
+    ]
 
 
 def test_flashmask_attention_rejects_nonempty_block_mask_before_dispatch(monkeypatch):

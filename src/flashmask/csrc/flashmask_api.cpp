@@ -8,6 +8,9 @@
 #ifndef FLASHMASK_KERNEL_READY
 #define FLASHMASK_KERNEL_READY 0
 #endif
+#ifndef FLASHMASK_BACKWARD_READY
+#define FLASHMASK_BACKWARD_READY 0
+#endif
 
 std::vector<at::Tensor> flashmask_fwd_cuda(
     const at::Tensor& q,
@@ -115,7 +118,7 @@ CachedDeviceSupport query_current_device_support() {
       return {};
     }
 #if defined(FLASHMASK_SM8X_KERNEL_READY)
-    return {true, prop.major == 8};
+    return {true, prop.major == 8 && prop.minor == 6};
 #else
     return {true, prop.major == 9 && prop.minor == 0};
 #endif
@@ -134,7 +137,7 @@ CachedDeviceSupport query_current_device_support() {
     return {};
   }
 #if defined(FLASHMASK_SM8X_KERNEL_READY)
-  cached = {true, prop.major == 8};
+  cached = {true, prop.major == 8 && prop.minor == 6};
 #else
   cached = {true, prop.major == 9 && prop.minor == 0};
 #endif
@@ -177,6 +180,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     return flashmask_current_device_is_supported();
   });
   m.def("backward_ready", []() {
+#if FLASHMASK_BACKWARD_READY
+    return flashmask_current_device_is_supported();
+#else
     return false;
+#endif
   });
 }

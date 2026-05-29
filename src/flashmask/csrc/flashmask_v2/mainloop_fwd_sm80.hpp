@@ -462,6 +462,21 @@ struct CollectiveMainloopFwdSm80 {
                 return false;
             }
         };
+        auto flashmask_previous_unmasked_n_block = [&](int candidate_n_block) {
+            if constexpr (Is_flashmask && !Is_causal && !Is_local && kStages == 1) {
+                #pragma unroll 1
+                while (candidate_n_block >= n_block_min &&
+                       flashmask_tile_fully_masked(candidate_n_block)) {
+                    --candidate_n_block;
+                }
+            }
+            return candidate_n_block;
+        };
+
+        if constexpr (Is_flashmask && !Is_causal && !Is_local && kStages == 1) {
+            n_block = flashmask_previous_unmasked_n_block(n_block);
+            if (n_block < n_block_min) { return false; }
+        }
 
         // Prologue: load Q, K, V
         // If persistent, we don't need to wait for the previous work_idx to finish
@@ -642,10 +657,12 @@ struct CollectiveMainloopFwdSm80 {
         };
 
         int smem_pipe_read = 0, smem_pipe_write = kStages - 1;
+        int next_n_block_to_load = n_block - kStages;
 
         auto load_K_next = [&] {
-            if (n_block - kStages >= n_block_min) {
-                load_K(n_block - kStages, kStages > 1 ? smem_pipe_write : 0, cute::false_type{} /*Seqlenk_mask*/);
+            next_n_block_to_load = flashmask_previous_unmasked_n_block(n_block - kStages);
+            if (next_n_block_to_load >= n_block_min) {
+                load_K(next_n_block_to_load, kStages > 1 ? smem_pipe_write : 0, cute::false_type{} /*Seqlenk_mask*/);
             }
             cute::cp_async_fence();
         };
@@ -702,12 +719,7 @@ struct CollectiveMainloopFwdSm80 {
             auto no_mask_fn = [](auto& tSrS, int n_block) { };
             bool have_first_iter = false;
             #pragma unroll 1
-            for (; n_block >= n_block_min; --n_block) {
-                if (flashmask_tile_fully_masked(n_block)) {
-                    sync();
-                    load_K_next();
-                    continue;
-                }
+            for (; n_block >= n_block_min; n_block = next_n_block_to_load) {
                 if (!have_first_iter) {
                     fwd_step(n_block, first_iter_mask_fn, cute::true_type{} /*is_first_iter*/, cute::true_type{} /*check_inf*/);
                     have_first_iter = true;
@@ -715,7 +727,6 @@ struct CollectiveMainloopFwdSm80 {
                     fwd_step(n_block, no_mask_fn, cute::false_type{} /*is_first_iter*/, cute::true_type{} /*check_inf*/);
                 }
             }
-            if (!have_first_iter) { return false; }
         } else {
             fwd_step(n_block, first_iter_mask_fn, cute::true_type{} /*is_first_iter*/, cute::true_type{} /*check_inf*/);
             --n_block;

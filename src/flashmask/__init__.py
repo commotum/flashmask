@@ -40,6 +40,10 @@ from .pe import (
 )
 from .proof import (
     ProofValidationError,
+    validate_proof_jsonl,
+    validate_proof_records,
+    validate_sm86_proof_jsonl,
+    validate_sm86_proof_records,
     validate_sm90_proof_jsonl,
     validate_sm90_proof_records,
 )
@@ -73,6 +77,10 @@ __all__ = [
     "normalize_startend_row_indices",
     "prefix_lm_mask",
     "sliding_window_mask",
+    "validate_proof_jsonl",
+    "validate_proof_records",
+    "validate_sm86_proof_jsonl",
+    "validate_sm86_proof_records",
     "validate_sm90_proof_jsonl",
     "validate_sm90_proof_records",
     "verify_backend",

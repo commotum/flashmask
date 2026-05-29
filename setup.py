@@ -16,10 +16,12 @@ FLASHMASK_V2_INSTANTIATIONS_DIR = FLASHMASK_V2_DIR / "instantiations"
 
 STUB_DEFINES = [
     "FLASHMASK_KERNEL_READY=0",
+    "FLASHMASK_BACKWARD_READY=0",
 ]
 
 EXPERIMENTAL_DEFINES = [
     "FLASHMASK_KERNEL_READY=1",
+    "FLASHMASK_BACKWARD_READY=0",
     "FLASHMASK_EXPERIMENTAL_BUILD=1",
     "FLASHMASK_V2_DISABLE_APPENDKV",
     "FLASHMASK_V2_DISABLE_BACKWARD",
@@ -39,6 +41,7 @@ EXPERIMENTAL_DEFINES = [
 
 EXPERIMENTAL_SM8X_DEFINES = [
     "FLASHMASK_KERNEL_READY=1",
+    "FLASHMASK_BACKWARD_READY=0",
     "FLASHMASK_EXPERIMENTAL_BUILD=1",
     "FLASHMASK_SM8X_KERNEL_READY=1",
     "FLASHMASK_SM8X_V2_BUILD=1",
@@ -147,9 +150,6 @@ def stub_sources() -> list[str]:
 
 
 def experimental_sources() -> list[str]:
-    # TODO: Add a real SM8x sparse forward target only after the SM80/86
-    # mainloop has a FlashMask metadata path. Building SM8x today would only
-    # exercise the dense forward path.
     return [
         str(CSRC_DIR / "flashmask_api.cpp"),
         str(CSRC_DIR / "flashmask_experimental.cu"),

@@ -4,8 +4,18 @@ import sys
 
 import pytest
 
-from flashmask import ProofValidationError, validate_sm90_proof_jsonl, validate_sm90_proof_records
-from flashmask.proof import REQUIRED_FLASHMASK_CUDA_KERNEL_MARKERS
+from flashmask import (
+    ProofValidationError,
+    validate_proof_records,
+    validate_sm86_proof_jsonl,
+    validate_sm86_proof_records,
+    validate_sm90_proof_jsonl,
+    validate_sm90_proof_records,
+)
+from flashmask.proof import (
+    REQUIRED_FLASHMASK_CUDA_KERNEL_MARKERS,
+    REQUIRED_FLASHMASK_SM8X_CUDA_KERNEL_MARKERS,
+)
 
 
 def _valid_record(**overrides):
@@ -14,6 +24,7 @@ def _valid_record(**overrides):
         "passed": True,
         "capability": [9, 0],
         "backend": "fa3",
+        "requested_backend": "fa3",
         "backend_kind": "sm90_sparse_fa3",
         "kernel_ready": True,
         "forward_ready": True,
@@ -23,6 +34,9 @@ def _valid_record(**overrides):
         "profiler_flashmask_cuda_kernel_events": [
             f"void {marker}(...)" for marker in REQUIRED_FLASHMASK_CUDA_KERNEL_MARKERS
         ],
+        "required_flashmask_cuda_kernel_markers": list(
+            REQUIRED_FLASHMASK_CUDA_KERNEL_MARKERS
+        ),
         "profiler_missing_flashmask_cuda_kernel_markers": [],
         "profiler_dense_attention_events": [],
         "speedup": 1.25,
@@ -30,6 +44,37 @@ def _valid_record(**overrides):
         "max_rel_error": 0.01,
         "atol": 0.03,
         "rtol": 0.03,
+    }
+    record.update(overrides)
+    return record
+
+
+def _valid_sm86_record(**overrides):
+    record = {
+        "status": "ok",
+        "passed": True,
+        "capability": [8, 6],
+        "backend": "flashmask-fa2-compatible",
+        "requested_backend": "fa2-compatible",
+        "backend_kind": "sm8x_sparse_fa2_compatible",
+        "kernel_ready": True,
+        "forward_ready": True,
+        "case": "full",
+        "profiler_check_skipped": False,
+        "profiler_flashmask_fwd": True,
+        "profiler_flashmask_cuda_kernel_events": [
+            f"void {marker}(...)" for marker in REQUIRED_FLASHMASK_SM8X_CUDA_KERNEL_MARKERS
+        ],
+        "required_flashmask_cuda_kernel_markers": list(
+            REQUIRED_FLASHMASK_SM8X_CUDA_KERNEL_MARKERS
+        ),
+        "profiler_missing_flashmask_cuda_kernel_markers": [],
+        "profiler_dense_attention_events": [],
+        "speedup": 1.9,
+        "max_abs_error": 0.003,
+        "max_rel_error": 200.0,
+        "atol": 0.06,
+        "rtol": 0.06,
     }
     record.update(overrides)
     return record
@@ -43,6 +88,64 @@ def test_validate_sm90_proof_records_accepts_complete_artifact():
     )
 
 
+def test_validate_sm86_proof_records_accepts_backend_specific_artifact():
+    validate_sm86_proof_records(
+        [_valid_sm86_record()],
+        min_speedup=1.5,
+        required_cases={"full"},
+    )
+
+
+def test_validate_proof_records_dispatches_by_backend():
+    validate_proof_records([_valid_sm86_record()], backend="fa2-compatible", min_speedup=1.5)
+
+
+def test_validate_sm86_proof_does_not_require_sm90_prepare_kernel_marker():
+    validate_sm86_proof_records(
+        [
+            _valid_sm86_record(
+                profiler_flashmask_cuda_kernel_events=[
+                    "void scanMaxMinChunkedKernel(...)",
+                    "void cutlass_flashmask_kernel(...)",
+                ],
+            )
+        ],
+        min_speedup=1.5,
+    )
+
+
+def test_validate_sm86_proof_rejects_wrong_backend_kind():
+    with pytest.raises(ProofValidationError, match="backend_kind is not sm8x_sparse_fa2_compatible"):
+        validate_sm86_proof_records(
+            [_valid_sm86_record(backend_kind="sm90_sparse_fa3")],
+            min_speedup=1.5,
+        )
+
+
+def test_validate_proof_rejects_wrong_required_marker_list():
+    with pytest.raises(ProofValidationError, match="marker list does not match backend"):
+        validate_sm86_proof_records(
+            [
+                _valid_sm86_record(
+                    required_flashmask_cuda_kernel_markers=[
+                        "prepare_flashmask_kernel",
+                        "scanMaxMinChunkedKernel",
+                        "cutlass_flashmask_kernel",
+                    ],
+                )
+            ],
+            min_speedup=1.5,
+        )
+
+
+def test_validate_proof_rejects_missing_parity_metrics():
+    record = _valid_sm86_record()
+    del record["max_abs_error"]
+    del record["max_rel_error"]
+    with pytest.raises(ProofValidationError, match="parity metrics are missing"):
+        validate_sm86_proof_records([record], min_speedup=1.5)
+
+
 @pytest.mark.parametrize(
     "override, message",
     [
@@ -53,6 +156,9 @@ def test_validate_sm90_proof_records_accepts_complete_artifact():
         ({"profiler_dense_attention_events": ["aten::matmul"]}, "dense attention events"),
         ({"speedup": 1.0}, "below required"),
         ({"backend": None}, "backend is not"),
+        ({"requested_backend": None}, "requested_backend is missing"),
+        ({"requested_backend": "fa2-compatible"}, "requested_backend is not"),
+        ({"required_flashmask_cuda_kernel_markers": None}, "marker list is missing"),
         ({"atol": None}, "atol is not numeric"),
         ({"max_abs_error": 0.04, "max_rel_error": 0.04}, "exceed tolerances"),
     ],
@@ -60,6 +166,18 @@ def test_validate_sm90_proof_records_accepts_complete_artifact():
 def test_validate_sm90_proof_records_rejects_incomplete_evidence(override, message):
     with pytest.raises(ProofValidationError, match=message):
         validate_sm90_proof_records([_valid_record(**override)], min_speedup=1.15)
+
+
+def test_validate_sm86_proof_records_rejects_missing_sm8x_kernel_marker():
+    with pytest.raises(ProofValidationError, match="missing CUDA kernel event marker scanMaxMinChunkedKernel"):
+        validate_sm86_proof_records(
+            [
+                _valid_sm86_record(
+                    profiler_flashmask_cuda_kernel_events=["void cutlass_flashmask_kernel(...)"],
+                )
+            ],
+            min_speedup=1.5,
+        )
 
 
 def test_validate_sm90_proof_jsonl_loads_multiple_artifacts(tmp_path):
@@ -75,6 +193,15 @@ def test_validate_sm90_proof_jsonl_loads_multiple_artifacts(tmp_path):
     )
 
     assert len(records) == 2
+
+
+def test_validate_sm86_proof_jsonl_loads_artifact(tmp_path):
+    path = tmp_path / "sm86.jsonl"
+    path.write_text(json.dumps(_valid_sm86_record()) + "\n")
+
+    records = validate_sm86_proof_jsonl([path], min_speedup=1.5, required_cases={"full"})
+
+    assert len(records) == 1
 
 
 def test_validate_sm90_proof_cli(tmp_path):
@@ -99,3 +226,29 @@ def test_validate_sm90_proof_cli(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert "validated 1 FlashMask SM90 proof records" in result.stdout
+
+
+def test_validate_sm86_proof_cli(tmp_path):
+    path = tmp_path / "proof-sm86.jsonl"
+    path.write_text(json.dumps(_valid_sm86_record()) + "\n")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "flashmask.proof",
+            str(path),
+            "--backend",
+            "fa2-compatible",
+            "--min-speedup",
+            "1.5",
+            "--require-case",
+            "full",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "validated 1 FlashMask SM86 proof records" in result.stdout

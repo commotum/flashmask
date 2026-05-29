@@ -103,25 +103,15 @@ def sparse_attention_forward(
 ) -> tuple[Any, Any]:
     """Call the compiled forward op once the requested sparse kernel is available."""
 
-    status = extension_status()
-    if (
-        not status.loaded
-        or not status.kernel_ready
-        or not status.forward_ready
-        or status.backend_kind != backend_kind
-    ):
-        raise NotImplementedError(
-            status.unavailable_reason or f"FlashMask sparse backend {backend_kind!r} is not available"
-        )
-    _validate_interval_mask_call(q, mask, causal)
-
-    import torch
-
-    startend = _startend_tensor_for_device(torch, mask, q.device)
-    if block_mask is None:
-        block_mask = _empty_block_mask_for_device(torch, q.device)
-    elif not hasattr(block_mask, "device"):
-        block_mask = torch.as_tensor(block_mask, dtype=torch.int32, device=q.device)
+    torch, startend, block_mask, softmax_scale, causal = _prepare_sparse_attention_call(
+        q,
+        mask,
+        softmax_scale=softmax_scale,
+        block_mask=block_mask,
+        causal=causal,
+        backend_kind=backend_kind,
+        require_backward=False,
+    )
 
     return torch.ops.flashmask.fwd(
         q,
@@ -129,8 +119,44 @@ def sparse_attention_forward(
         v,
         startend,
         block_mask,
-        float("nan") if softmax_scale is None else float(softmax_scale),
-        bool(mask.causal if causal is None else causal),
+        softmax_scale,
+        causal,
+    )
+
+
+def sparse_attention_forward_with_backward(
+    q: Any,
+    k: Any,
+    v: Any,
+    mask: IntervalMask,
+    *,
+    softmax_scale: float | None = None,
+    block_mask: Any | None = None,
+    causal: bool | None = None,
+    backend_kind: str = SPARSE_SM90_FA3_BACKEND_KIND,
+    deterministic: bool = False,
+) -> tuple[Any, Any]:
+    """Call forward through an autograd wrapper backed by ``flashmask::bwd``."""
+
+    torch, startend, block_mask, softmax_scale, causal = _prepare_sparse_attention_call(
+        q,
+        mask,
+        softmax_scale=softmax_scale,
+        block_mask=block_mask,
+        causal=causal,
+        backend_kind=backend_kind,
+        require_backward=True,
+    )
+    function = _flashmask_attention_autograd_function(torch)
+    return function.apply(
+        q,
+        k,
+        v,
+        startend,
+        block_mask,
+        softmax_scale,
+        causal,
+        bool(deterministic),
     )
 
 
@@ -160,6 +186,96 @@ def _empty_block_mask_for_device(torch: Any, device: Any) -> Any:
     block_mask = torch.empty(0, dtype=torch.int32, device=device)
     _EMPTY_BLOCK_MASK_CACHE[cache_key] = block_mask
     return block_mask
+
+
+def _prepare_sparse_attention_call(
+    q: Any,
+    mask: IntervalMask,
+    *,
+    softmax_scale: float | None,
+    block_mask: Any | None,
+    causal: bool | None,
+    backend_kind: str,
+    require_backward: bool,
+) -> tuple[Any, Any, Any, float, bool]:
+    status = extension_status()
+    if (
+        not status.loaded
+        or not status.kernel_ready
+        or not status.forward_ready
+        or status.backend_kind != backend_kind
+    ):
+        raise NotImplementedError(
+            status.unavailable_reason or f"FlashMask sparse backend {backend_kind!r} is not available"
+        )
+    if require_backward and not status.backward_ready:
+        raise NotImplementedError(f"FlashMask sparse backend {backend_kind!r} does not support backward")
+    _validate_interval_mask_call(q, mask, causal)
+
+    import torch
+
+    startend = _startend_tensor_for_device(torch, mask, q.device)
+    if block_mask is None:
+        block_mask = _empty_block_mask_for_device(torch, q.device)
+    elif not hasattr(block_mask, "device"):
+        block_mask = torch.as_tensor(block_mask, dtype=torch.int32, device=q.device)
+
+    scale = float("nan") if softmax_scale is None else float(softmax_scale)
+    return torch, startend, block_mask, scale, bool(mask.causal if causal is None else causal)
+
+
+def _flashmask_attention_autograd_function(torch: Any) -> Any:
+    class FlashMaskAttentionAutograd(torch.autograd.Function):  # type: ignore[name-defined]
+        @staticmethod
+        def forward(
+            ctx: Any,
+            q: Any,
+            k: Any,
+            v: Any,
+            startend: Any,
+            block_mask: Any,
+            softmax_scale: float,
+            causal: bool,
+            deterministic: bool,
+        ) -> tuple[Any, Any]:
+            out, softmax_lse = torch.ops.flashmask.fwd(
+                q,
+                k,
+                v,
+                startend,
+                block_mask,
+                softmax_scale,
+                causal,
+            )
+            if hasattr(ctx, "set_materialize_grads"):
+                ctx.set_materialize_grads(False)
+            ctx.save_for_backward(q, k, v, out, softmax_lse, startend, block_mask)
+            ctx.softmax_scale = float(softmax_scale)
+            ctx.causal = bool(causal)
+            ctx.deterministic = bool(deterministic)
+            return out, softmax_lse
+
+        @staticmethod
+        def backward(ctx: Any, dout: Any, dsoftmax_lse: Any = None) -> tuple[Any, ...]:
+            if dsoftmax_lse is not None:
+                raise RuntimeError("FlashMask autograd does not support gradients through softmax_lse")
+            q, k, v, out, softmax_lse, startend, block_mask = ctx.saved_tensors
+            dq, dk, dv = torch.ops.flashmask.bwd(
+                dout,
+                q,
+                k,
+                v,
+                out,
+                softmax_lse,
+                startend,
+                block_mask,
+                ctx.softmax_scale,
+                ctx.causal,
+                ctx.deterministic,
+            )
+            return dq, dk, dv, None, None, None, None, None
+
+    return FlashMaskAttentionAutograd
 
 
 def _validate_interval_mask_call(q: Any, mask: IntervalMask, causal: bool | None) -> None:

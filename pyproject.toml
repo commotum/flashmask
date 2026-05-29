@@ -8,6 +8,7 @@ dependencies = []
 
 [project.scripts]
 flashmask-bench-sm90 = "flashmask.bench_sm90:main"
+flashmask-validate-proof = "flashmask.proof:main"
 flashmask-validate-sm90-proof = "flashmask.proof:main"
 
 [build-system]

@@ -302,6 +302,7 @@ def _common_record(torch: Any, gate: dict[str, Any]) -> dict[str, Any]:
         "torch_version": torch.__version__,
         "cuda_version": torch.version.cuda,
         "_C_path": gate.get("module_path"),
+        "requested_backend": "fa3",
         "kernel_ready": bool(gate["kernel_ready"]),
         "forward_ready": bool(gate["forward_ready"]),
         "backend_kind": gate.get("backend_kind"),
@@ -450,6 +451,9 @@ def _run_case(
         "profiler_flashmask_cuda_kernel_events": list(profiler_flashmask_cuda_kernel_events),
         "profiler_missing_flashmask_cuda_kernel_markers": list(
             profiler_missing_cuda_kernel_markers
+        ),
+        "required_flashmask_cuda_kernel_markers": list(
+            REQUIRED_FLASHMASK_CUDA_KERNEL_MARKERS
         ),
         "profiler_dense_attention_events": list(profiler_dense_events),
         "case": case,

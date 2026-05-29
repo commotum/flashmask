@@ -10,6 +10,7 @@ from ._backend import (
     SPARSE_SM90_FA3_BACKEND_KIND,
     extension_status,
     sparse_attention_forward,
+    sparse_attention_forward_with_backward,
 )
 from .core import IntervalMask
 
@@ -190,7 +191,8 @@ def flashmask_attention(
             str(exc) or f"FlashMask attention backend {backend!r} is not implemented"
         ) from exc
 
-    output, softmax_lse = sparse_attention_forward(
+    forward = sparse_attention_forward_with_backward if needs_backward else sparse_attention_forward
+    output, softmax_lse = forward(
         q,
         k,
         v,

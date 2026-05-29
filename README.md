@@ -87,8 +87,9 @@ uv pip install -e . --no-build-isolation -v
 For local SM86/Ampere validation, build the experimental SM8x interval kernel
 from a CUDA-enabled PyTorch environment. This path currently targets PE's
 non-causal `bound_num=2` interval mask and applies exact interval masking inside
-the SM80/86 FlashAttention mainloop; tile skipping is still the next kernel
-milestone.
+the SM80/86 FlashAttention mainloop. In the active kStages=1 SM86 path it scans
+per query block and queues only K blocks that are not fully masked before K/V
+loads and MMA; partial K blocks are still scored and masked after MMA.
 
 ```bash
 FLASHMASK_BUILD_EXPERIMENTAL_SM8X_CUDA=1 \
@@ -111,6 +112,16 @@ It checks FlashMask output and LSE against a dense reference, confirms the
 `fa3` backend, verifies that `flashmask::fwd` and the expected FlashMask CUDA
 kernel markers appear in a profiler trace, and records median public-API,
 raw-op, and dense SDPA timings.
+The proof record is self-describing: the validator requires
+`requested_backend=fa3`, `backend_kind=sm90_sparse_fa3`, the exact SM90 CUDA
+marker list, parity metrics, no profiler skip, and no dense attention events.
+
+The proof validator is backend-aware; PE's SM86 benchmark artifacts can be
+validated with:
+
+```bash
+uv run flashmask-validate-proof --backend fa2-compatible --min-speedup 1.5 --require-case full /home/jake/Developer/pe/artifacts/pe-flashmask-sm86.jsonl
+```
 
 For CI or an explicit SM90 validation run, make optional GPU tests fail instead
 of skip when the backend is unavailable:
