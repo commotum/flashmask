@@ -5,9 +5,11 @@
 
 #include "flashmask_v2/flash.h"
 
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <mutex>
 #include <vector>
 
 namespace {
@@ -17,6 +19,11 @@ int64_t round_up(int64_t value, int64_t multiple) {
 }
 
 int64_t flashmask_maxmin_elements(int64_t batch, int64_t mask_heads, int64_t seqlen_k) {
+#ifdef FLASHMASK_SM8X_V2_BUILD
+  constexpr int64_t kWorstCaseBlockN = 64;
+  const int64_t nblock_seqlen = round_up((seqlen_k + kWorstCaseBlockN - 1) / kWorstCaseBlockN, 4);
+  return 8 * batch * mask_heads * nblock_seqlen;
+#else
   constexpr int64_t kWorstCaseBlockN = 64;
   constexpr int64_t kFlashmaskBufferLength = 16 * 1024;
   const int64_t nblock_seqlen = round_up((seqlen_k + kWorstCaseBlockN - 1) / kWorstCaseBlockN, 4);
@@ -26,6 +33,7 @@ int64_t flashmask_maxmin_elements(int64_t batch, int64_t mask_heads, int64_t seq
       round_up((kFlashmaskBufferLength + kWorstCaseBlockN - 1) / kWorstCaseBlockN, 32);
   const int64_t num_chunk = (nblock_seqlen + chunk_valid_length - 1) / chunk_valid_length;
   return 8 * batch * mask_heads * num_chunk * chunk_padded_length;
+#endif
 }
 
 int rounded_dim(int64_t query_head_dim, int64_t value_head_dim) {
@@ -39,6 +47,36 @@ bool raw_startend_validation_enabled() {
 
 bool any_true_sync(const at::Tensor& value) {
   return value.any().item<bool>();
+}
+
+struct CachedDeviceInfo {
+  bool initialized = false;
+  int arch = 0;
+  int num_sm = 0;
+};
+
+CachedDeviceInfo query_device_info_uncached(int device) {
+  cudaDeviceProp prop;
+  C10_CUDA_CHECK(cudaGetDeviceProperties(&prop, device));
+  int num_sm = 0;
+  C10_CUDA_CHECK(cudaDeviceGetAttribute(&num_sm, cudaDevAttrMultiProcessorCount, device));
+  return {true, prop.major * 10 + prop.minor, num_sm};
+}
+
+CachedDeviceInfo query_device_info(int device) {
+  constexpr int kMaxCachedDevices = 64;
+  if (device < 0 || device >= kMaxCachedDevices) {
+    return query_device_info_uncached(device);
+  }
+
+  static std::array<CachedDeviceInfo, kMaxCachedDevices> cache{};
+  static std::mutex cache_mutex;
+  std::lock_guard<std::mutex> lock(cache_mutex);
+  CachedDeviceInfo& cached = cache[device];
+  if (!cached.initialized) {
+    cached = query_device_info_uncached(device);
+  }
+  return cached;
 }
 
 void validate_startend_debug(
@@ -128,6 +166,12 @@ void check_forward_inputs(
           startend_row_indices.size(3) == 2 ||
       startend_row_indices.size(3) == 4,
       "startend bound_num must be 1, 2, or 4");
+#ifdef FLASHMASK_SM8X_V2_BUILD
+  TORCH_CHECK(!causal, "experimental FlashMask SM8x V2 forward currently supports non-causal interval masks only");
+  TORCH_CHECK(
+      startend_row_indices.size(3) == 2,
+      "experimental FlashMask SM8x V2 forward currently supports PE non-causal bound_num=2 masks only");
+#endif
   constexpr int64_t kMaxInt = static_cast<int64_t>(std::numeric_limits<int>::max());
   TORCH_CHECK(q.size(0) <= kMaxInt, "batch size must fit int32");
   TORCH_CHECK(q.size(1) <= kMaxInt, "q sequence length must fit int32");
@@ -280,12 +324,14 @@ std::vector<at::Tensor> flashmask_fwd_cuda(
   check_forward_inputs(q, k, v, startend_row_indices, block_mask, causal);
 
   const c10::cuda::CUDAGuard device_guard(q.device());
-  cudaDeviceProp prop;
-  C10_CUDA_CHECK(cudaGetDeviceProperties(&prop, q.get_device()));
-  const int arch = prop.major * 10 + prop.minor;
-  TORCH_CHECK(arch == 90, "experimental FlashMask forward requires an SM90 GPU");
-  int num_sm = 0;
-  C10_CUDA_CHECK(cudaDeviceGetAttribute(&num_sm, cudaDevAttrMultiProcessorCount, q.get_device()));
+  const CachedDeviceInfo device_info = query_device_info(q.get_device());
+  const int arch = device_info.arch;
+#ifdef FLASHMASK_SM8X_V2_BUILD
+  TORCH_CHECK(arch == 86, "experimental FlashMask SM8x V2 forward requires an SM86 / compute capability 8.6 GPU");
+#else
+  TORCH_CHECK(arch == 90, "experimental FlashMask forward requires an SM90 / compute capability 9.0 GPU");
+#endif
+  const int num_sm = device_info.num_sm;
 
   at::Tensor out = at::empty({q.size(0), q.size(1), q.size(2), v.size(3)}, q.options());
   at::Tensor softmax_lse = at::empty({q.size(0), q.size(2), q.size(1)}, q.options().dtype(at::kFloat));
@@ -312,15 +358,31 @@ std::vector<at::Tensor> flashmask_fwd_cuda(
   const int rounded_head_dim = rounded_dim(q.size(3), v.size(3));
   if (q.scalar_type() == at::kBFloat16) {
     if (rounded_head_dim == 96) {
+#ifdef FLASHMASK_SM8X_V2_BUILD
+      run_mha_fwd_<86, cutlass::bfloat16_t, 96, 96, false, false, false, false>(params, stream);
+#else
       run_mha_fwd_<90, cutlass::bfloat16_t, 96, 96, false, false, false, false>(params, stream);
+#endif
     } else {
+#ifdef FLASHMASK_SM8X_V2_BUILD
+      run_mha_fwd_<86, cutlass::bfloat16_t, 128, 128, false, false, false, false>(params, stream);
+#else
       run_mha_fwd_<90, cutlass::bfloat16_t, 128, 128, false, false, false, false>(params, stream);
+#endif
     }
   } else {
     if (rounded_head_dim == 96) {
+#ifdef FLASHMASK_SM8X_V2_BUILD
+      run_mha_fwd_<86, cutlass::half_t, 96, 96, false, false, false, false>(params, stream);
+#else
       run_mha_fwd_<90, cutlass::half_t, 96, 96, false, false, false, false>(params, stream);
+#endif
     } else {
+#ifdef FLASHMASK_SM8X_V2_BUILD
+      run_mha_fwd_<86, cutlass::half_t, 128, 128, false, false, false, false>(params, stream);
+#else
       run_mha_fwd_<90, cutlass::half_t, 128, 128, false, false, false, false>(params, stream);
+#endif
     }
   }
   return {out, softmax_lse};

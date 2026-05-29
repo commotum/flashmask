@@ -1,6 +1,8 @@
 #include <torch/extension.h>
 #include <cuda_runtime.h>
 
+#include <array>
+#include <mutex>
 #include <vector>
 
 #ifndef FLASHMASK_KERNEL_READY
@@ -93,20 +95,88 @@ TORCH_LIBRARY_IMPL(flashmask, CUDA, m) {
   m.impl("bwd", &flashmask_bwd);
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("kernel_ready", []() {
+namespace {
+
+struct CachedDeviceSupport {
+  bool initialized = false;
+  bool supported = false;
+};
+
+CachedDeviceSupport query_current_device_support() {
 #if FLASHMASK_KERNEL_READY
-    int device = 0;
-    if (cudaGetDevice(&device) != cudaSuccess) {
-      return false;
-    }
+  int device = 0;
+  if (cudaGetDevice(&device) != cudaSuccess) {
+    return {};
+  }
+  constexpr int kMaxCachedDevices = 64;
+  if (device < 0 || device >= kMaxCachedDevices) {
     cudaDeviceProp prop;
     if (cudaGetDeviceProperties(&prop, device) != cudaSuccess) {
-      return false;
+      return {};
     }
-    return prop.major == 9;
+#if defined(FLASHMASK_SM8X_KERNEL_READY)
+    return {true, prop.major == 8};
 #else
-    return false;
+    return {true, prop.major == 9 && prop.minor == 0};
 #endif
+  }
+
+  static std::array<CachedDeviceSupport, kMaxCachedDevices> cache{};
+  static std::mutex cache_mutex;
+  std::lock_guard<std::mutex> lock(cache_mutex);
+  CachedDeviceSupport& cached = cache[device];
+  if (cached.initialized) {
+    return cached;
+  }
+
+  cudaDeviceProp prop;
+  if (cudaGetDeviceProperties(&prop, device) != cudaSuccess) {
+    return {};
+  }
+#if defined(FLASHMASK_SM8X_KERNEL_READY)
+  cached = {true, prop.major == 8};
+#else
+  cached = {true, prop.major == 9 && prop.minor == 0};
+#endif
+  return cached;
+#else
+  return {};
+#endif
+}
+
+}  // namespace
+
+bool flashmask_current_device_is_supported() {
+  return query_current_device_support().supported;
+}
+
+bool flashmask_current_device_is_sm90() {
+#if defined(FLASHMASK_SM8X_KERNEL_READY)
+  return false;
+#else
+  return flashmask_current_device_is_supported();
+#endif
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("backend_kind", []() {
+#if FLASHMASK_KERNEL_READY
+#if defined(FLASHMASK_SM8X_KERNEL_READY)
+    return "sm8x_sparse_fa2_compatible";
+#else
+    return "sm90_sparse_fa3";
+#endif
+#else
+    return "stub";
+#endif
+  });
+  m.def("kernel_ready", []() {
+    return flashmask_current_device_is_supported();
+  });
+  m.def("forward_ready", []() {
+    return flashmask_current_device_is_supported();
+  });
+  m.def("backward_ready", []() {
+    return false;
   });
 }

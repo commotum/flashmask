@@ -3,10 +3,15 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 from flashmask import (
     MaskNotRepresentableError,
+    causal_mask,
     compile_dense_bool_mask,
     document_mask,
+    from_dense_bool_mask,
+    prefix_lm_mask,
     sliding_window_mask,
 )
 
@@ -34,12 +39,43 @@ def test_sliding_window_builder_matches_context_mask():
     assert mask.to_bool_mask()[0][0] == expected
 
 
+def test_causal_builder_valid_lengths_matches_context_mask():
+    context = _context_masks()
+    expected = _bool(context.mask_1_causal)
+
+    mask = causal_mask(10, valid_lengths=8)
+
+    assert mask.causal is True
+    assert mask.bound_num == 1
+    assert mask.to_bool_mask()[0][0] == expected
+
+
 def test_document_builder_matches_context_mask():
     context = _context_masks()
     expected = _bool(context.mask_4_document)
 
     mask = document_mask([4, 3, 3])
 
+    assert mask.to_bool_mask()[0][0] == expected
+
+
+def test_causal_document_builder_matches_context_mask():
+    context = _context_masks()
+    expected = _bool(context.mask_3_causal_document)
+
+    mask = document_mask([4, 3, 3], causal=True)
+
+    assert mask.bound_num == 2
+    assert mask.to_bool_mask()[0][0] == expected
+
+
+def test_prefix_lm_builder_matches_context_mask():
+    context = _context_masks()
+    expected = _bool(context.mask_9_prefix_lm_causal)
+
+    mask = prefix_lm_mask(10, 5)
+
+    assert mask.bound_num == 2
     assert mask.to_bool_mask()[0][0] == expected
 
 
@@ -50,6 +86,34 @@ def test_dense_compiler_represents_global_sliding_context_mask_with_bound4():
     mask = compile_dense_bool_mask(expected)
 
     assert mask.bound_num == 4
+    assert mask.to_bool_mask()[0][0] == expected
+
+
+@pytest.mark.parametrize(
+    ("name", "bound_num"),
+    [
+        ("mask_1_causal", 2),
+        ("mask_2_sliding_window", 2),
+        ("mask_3_causal_document", 2),
+        ("mask_4_document", 2),
+        ("mask_5_share_question", 2),
+        ("mask_6_global_sliding", 4),
+        ("mask_7_causal_blockwise", 4),
+        ("mask_8_prefix_lm_document", 2),
+        ("mask_9_prefix_lm_causal", 2),
+        ("mask_10_qk_sparse", 2),
+        ("mask_11_hash_sparse", 2),
+        ("mask_12_random_eviction", 2),
+    ],
+)
+def test_context_mask_manifest_reconstructs_expected_interval_shape(name, bound_num):
+    context = _context_masks()
+    expected = _bool(getattr(context, name))
+
+    mask = from_dense_bool_mask(expected, bound_num=bound_num)
+
+    assert mask.causal is False
+    assert mask.bound_num == bound_num
     assert mask.to_bool_mask()[0][0] == expected
 
 

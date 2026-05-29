@@ -49,8 +49,8 @@ struct CollectiveMainloopFwdSm80 {
 
     static_assert(ArchTag::kMinComputeCapability >= 80);
     static_assert(
-        !Is_flashmask,
-        "SM80/86 FlashMask sparse forward requires porting the FlashMask metadata path before enabling");
+        !Is_flashmask || (!Is_local && !Varlen && !PagedKV && !AppendKV && !PackGQA && !Split),
+        "SM80/86 FlashMask sparse forward currently supports only dense Q/K/V non-local non-varlen forward");
 
     static constexpr bool Has_cp_async = ArchTag::kMinComputeCapability >= 80;
 
@@ -283,8 +283,7 @@ struct CollectiveMainloopFwdSm80 {
         int const* const seqused_k = nullptr;
         int const* const leftpad_k = nullptr;
 
-        // FlashMask sparse metadata. The SM80/86 sparse path remains gated
-        // until the device-side metadata walk is ported.
+        // FlashMask sparse metadata.
         int const h_flashmask;
         int const h_h_flashmask_ratio;
         int32_t* __restrict__ const lt_start_ptr = nullptr;
@@ -442,6 +441,27 @@ struct CollectiveMainloopFwdSm80 {
         int const seqlen_q = seqlen_info.seqlen_q;
         int const seqlen_k = seqlen_info.seqlen_k;
         int n_block = n_block_max - 1;
+
+        auto flashmask_tile_fully_masked = [&](int const candidate_n_block) {
+            if constexpr (Is_flashmask && !Is_causal && !Is_local && kStages == 1) {
+                if (params.lt_start_ptr == nullptr || params.ut_end_ptr == nullptr ||
+                    params.lt_end_ptr != nullptr || params.ut_start_ptr != nullptr ||
+                    params.lt_start_nblockmax == nullptr || params.ut_end_nblockmin == nullptr) {
+                    return false;
+                }
+                int const mask_h = bidh / params.h_h_flashmask_ratio;
+                int const nblock_seqlen = ((seqlen_k + kBlockN - 1) / kBlockN + 3) & 0xfffffffc;
+                int const mask_offset =
+                    (bidb * params.h_flashmask + mask_h) * nblock_seqlen + candidate_n_block;
+                int const m_block_s = m_block * kBlockM;
+                int const m_block_e = std::min(m_block_s + kBlockM, seqlen_q);
+                int const lt_start_max = params.lt_start_nblockmax[mask_offset];
+                int const ut_end_min = params.ut_end_nblockmin[mask_offset];
+                return (m_block_s >= lt_start_max) || (m_block_e <= ut_end_min);
+            } else {
+                return false;
+            }
+        };
 
         // Prologue: load Q, K, V
         // If persistent, we don't need to wait for the previous work_idx to finish
@@ -660,6 +680,9 @@ struct CollectiveMainloopFwdSm80 {
             // Faster to load_K before gemm if we only have 1 stage
             if constexpr (kStages == 1) { sync(); load_K_next(); }
             mask_fn(tSrS, n_block);
+            if constexpr (Is_flashmask) {
+                flashmask_apply_direct(tSrS, params, thread_idx, m_block, n_block, bidb, bidh, seqlen_k);
+            }
             Tensor scores_scale = softmax.template max_get_scale</*Is_first=*/Is_first_iter, Check_inf>(tSrS);
             softmax.template online_softmax</*Is_first=*/Is_first_iter, Check_inf>(tSrS);
             if constexpr (Is_FP8) { flash::permute_Cregs_fp8(tSrS); }
@@ -675,34 +698,54 @@ struct CollectiveMainloopFwdSm80 {
         };
 
         auto first_iter_mask_fn = [&](auto& tSrS, int n_block) { mask.template apply<true /*Seqlenk_mask*/, Is_causal, Is_local>(tSrS, m_block, n_block); };
-        fwd_step(n_block, first_iter_mask_fn, cute::true_type{} /*is_first_iter*/, cute::true_type{} /*check_inf*/);
-        --n_block;
-        if constexpr (Is_causal || Is_local) { // Separate iterations with causal or local masking
-            auto mask_fn = [&](auto& tSrS, int n_block) { mask.template apply<false /*Seqlenk_mask*/, Is_causal, Is_local>(tSrS, m_block, n_block); };
-            int const m_idx_min = !PackGQA ? m_block * kBlockM : params.qhead_per_khead_divmod.divide(m_block * kBlockM);
-            int const n_block_min_causal_local_mask =
-                std::max(n_block_min, (m_idx_min + seqlen_k - seqlen_q + params.window_size_right) / kBlockN);
-            #pragma unroll 1
-            for (; n_block >= n_block_min_causal_local_mask; --n_block) {
-                fwd_step(n_block, mask_fn, cute::false_type{} /*is_first_iter*/, cute::true_type{} /*check_inf*/);
-            }
-        }
-        int const m_idx_max = !PackGQA ? (m_block + 1) * kBlockM : params.qhead_per_khead_divmod.divide((m_block + 1) * kBlockM - 1) + 1;
-        int const n_block_min_before_local_mask = !Is_local
-            ? n_block_min
-            : std::max(n_block_min,
-                        cute::ceil_div(m_idx_max + seqlen_k - seqlen_q - params.window_size_left, kBlockN));
-        auto no_mask_fn = [](auto& tSrS, int n_block) { };
-        #pragma unroll 1
-        for (; n_block >= n_block_min_before_local_mask; --n_block) {
-            fwd_step(n_block, no_mask_fn, cute::false_type{} /*is_first_iter*/, cute::bool_constant<Is_flashmask>{} /*check_inf*/);
-        }
-        // Separate masking iterations on the left for local attention
-        if constexpr (Is_local) {
-            auto local_mask_fn = [&](auto& tSrS, int n_block) { mask.template apply<false /*Seqlenk_mask*/, false /*Causal_mask*/, Is_local>(tSrS, m_block, n_block); };
+        if constexpr (Is_flashmask && !Is_causal && !Is_local && kStages == 1) {
+            auto no_mask_fn = [](auto& tSrS, int n_block) { };
+            bool have_first_iter = false;
             #pragma unroll 1
             for (; n_block >= n_block_min; --n_block) {
-                fwd_step(n_block, local_mask_fn, cute::false_type{} /*is_first_iter*/, cute::bool_constant<Is_local>{} /*check_inf*/);
+                if (flashmask_tile_fully_masked(n_block)) {
+                    sync();
+                    load_K_next();
+                    continue;
+                }
+                if (!have_first_iter) {
+                    fwd_step(n_block, first_iter_mask_fn, cute::true_type{} /*is_first_iter*/, cute::true_type{} /*check_inf*/);
+                    have_first_iter = true;
+                } else {
+                    fwd_step(n_block, no_mask_fn, cute::false_type{} /*is_first_iter*/, cute::true_type{} /*check_inf*/);
+                }
+            }
+            if (!have_first_iter) { return false; }
+        } else {
+            fwd_step(n_block, first_iter_mask_fn, cute::true_type{} /*is_first_iter*/, cute::true_type{} /*check_inf*/);
+            --n_block;
+            if constexpr (Is_causal || Is_local) { // Separate iterations with causal or local masking
+                auto mask_fn = [&](auto& tSrS, int n_block) { mask.template apply<false /*Seqlenk_mask*/, Is_causal, Is_local>(tSrS, m_block, n_block); };
+                int const m_idx_min = !PackGQA ? m_block * kBlockM : params.qhead_per_khead_divmod.divide(m_block * kBlockM);
+                int const n_block_min_causal_local_mask =
+                    std::max(n_block_min, (m_idx_min + seqlen_k - seqlen_q + params.window_size_right) / kBlockN);
+                #pragma unroll 1
+                for (; n_block >= n_block_min_causal_local_mask; --n_block) {
+                    fwd_step(n_block, mask_fn, cute::false_type{} /*is_first_iter*/, cute::true_type{} /*check_inf*/);
+                }
+            }
+            int const m_idx_max = !PackGQA ? (m_block + 1) * kBlockM : params.qhead_per_khead_divmod.divide((m_block + 1) * kBlockM - 1) + 1;
+            int const n_block_min_before_local_mask = !Is_local
+                ? n_block_min
+                : std::max(n_block_min,
+                            cute::ceil_div(m_idx_max + seqlen_k - seqlen_q - params.window_size_left, kBlockN));
+            auto no_mask_fn = [](auto& tSrS, int n_block) { };
+            #pragma unroll 1
+            for (; n_block >= n_block_min_before_local_mask; --n_block) {
+                fwd_step(n_block, no_mask_fn, cute::false_type{} /*is_first_iter*/, cute::bool_constant<Is_flashmask>{} /*check_inf*/);
+            }
+            // Separate masking iterations on the left for local attention
+            if constexpr (Is_local) {
+                auto local_mask_fn = [&](auto& tSrS, int n_block) { mask.template apply<false /*Seqlenk_mask*/, false /*Causal_mask*/, Is_local>(tSrS, m_block, n_block); };
+                #pragma unroll 1
+                for (; n_block >= n_block_min; --n_block) {
+                    fwd_step(n_block, local_mask_fn, cute::false_type{} /*is_first_iter*/, cute::bool_constant<Is_local>{} /*check_inf*/);
+                }
             }
         }
         float const v_descale = !Is_FP8 || params.ptr_v_descale == nullptr ? 1.0f : params.ptr_v_descale[bidb * get<0>(params.stride_v_descale) + bidh_kv * get<1>(params.stride_v_descale)];
@@ -710,6 +753,70 @@ struct CollectiveMainloopFwdSm80 {
         softmax.rescale_o(tOrO, scores_scale);
         if constexpr (Is_FP8) { flash::permute_output_fp8(tOrO); }
         return true;
+    }
+
+    template <typename Engine, typename Layout>
+    CUTLASS_DEVICE void
+    flashmask_apply_direct(Tensor<Engine, Layout>& tSrS,
+                           Params const& params,
+                           int const thread_idx,
+                           int const m_block,
+                           int const n_block,
+                           int const bidb,
+                           int const bidh,
+                           int const seqlen_k) {
+        static_assert(!PackGQA, "SM80/86 direct FlashMask apply does not support PackGQA");
+        auto thread_mma = TiledMma{}.get_thread_slice(thread_idx);
+
+        Tensor cS = cute::make_identity_tensor(Shape<Int<kBlockM>, Int<kBlockN>>{});
+        Tensor tScS = thread_mma.partition_C(cS);
+        Tensor tSrS_rowcol = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/false>(tSrS.layout()));
+        Tensor tScS_rowcol = make_tensor(tScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/false>(tScS.layout()));
+
+        static constexpr int Row = 0, Col = 1;
+        int const mask_h = bidh / params.h_h_flashmask_ratio;
+        int const mask_base = (bidb * params.h_flashmask + mask_h) * seqlen_k;
+        int const q_block_offset = m_block * kBlockM;
+        int const k_block_offset = n_block * kBlockN;
+
+        int32_t const* const lt_start = params.lt_start_ptr + mask_base;
+        int32_t const* const lt_end = params.lt_end_ptr ? params.lt_end_ptr + mask_base : nullptr;
+        int32_t const* const ut_start = params.ut_start_ptr ? params.ut_start_ptr + mask_base : nullptr;
+        int32_t const* const ut_end = params.ut_end_ptr ? params.ut_end_ptr + mask_base : nullptr;
+
+        #pragma unroll
+        for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
+            int const col_idx = get<Col>(tScS_rowcol(_0{}, n));
+            int const key_idx = k_block_offset + col_idx;
+            if (key_idx >= seqlen_k) {
+                continue;
+            }
+            int const lts = lt_start[key_idx];
+            int lte = 0;
+            int uts = 0;
+            int ute = 0;
+            if (lt_end != nullptr) { lte = lt_end[key_idx]; }
+            if (ut_start != nullptr) { uts = ut_start[key_idx]; }
+            if (ut_end != nullptr) { ute = ut_end[key_idx]; }
+
+            #pragma unroll
+            for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
+                int const row_idx = q_block_offset + get<Row>(tScS_rowcol(m, n));
+                bool masked = false;
+                if constexpr (Is_causal) {
+                    masked = lt_end == nullptr ? row_idx >= lts : (row_idx >= lts && row_idx < lte);
+                } else {
+                    if (lt_end != nullptr && ut_start != nullptr && ut_end != nullptr) {
+                        masked = (row_idx >= lts && row_idx < lte) || (row_idx >= uts && row_idx < ute);
+                    } else {
+                        masked = ut_end != nullptr && (row_idx >= lts || row_idx < ute);
+                    }
+                }
+                if (masked) {
+                    tSrS_rowcol(m, n) = -INFINITY;
+                }
+            }
+        }
     }
 
     template <typename SharedStorage>

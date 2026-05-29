@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import math
+import os
 
 import pytest
 
@@ -17,18 +18,34 @@ from flashmask import (
 TYPES = PETokenTypeIds()
 
 
+def _require_or_skip(reason: str) -> None:
+    if os.environ.get("FLASHMASK_REQUIRE_SM90") == "1":
+        raise AssertionError(reason)
+    pytest.skip(reason)
+
+
+def _require_torch():
+    try:
+        import torch
+    except Exception as exc:  # pragma: no cover - depends on local environment
+        _require_or_skip(f"torch is required for FlashMask SM90 validation: {exc}")
+    return torch
+
+
 def _require_sm90_extension():
     if importlib.util.find_spec("flashmask._C") is None:
-        pytest.skip("compiled FlashMask extension is not built")
-    torch = pytest.importorskip("torch")
+        _require_or_skip("compiled FlashMask extension is not built")
+    torch = _require_torch()
     if not torch.cuda.is_available():
-        pytest.skip("CUDA is not available")
+        _require_or_skip("CUDA is not available")
 
     import flashmask._C as extension
 
     capability = torch.cuda.get_device_capability()
-    if capability[0] != 9 or not bool(extension.kernel_ready()):
-        pytest.skip("FlashMask sparse forward requires an SM90 CUDA device")
+    if tuple(capability) != (9, 0) or not bool(extension.kernel_ready()):
+        _require_or_skip(
+            "FlashMask sparse forward requires an SM90 / compute capability 9.0 CUDA device"
+        )
     return torch
 
 

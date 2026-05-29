@@ -55,6 +55,19 @@ The kernel is the project priority. The Python package now has a lazy backend
 loader and a PyTorch extension scaffold under `src/flashmask/csrc` with the
 intended `flashmask::fwd` and `flashmask::bwd` op names.
 
+The experimental SM90 path is forward-only. Calls with gradient-tracking Q/K/V
+fail unless `verify_backend(require_backward=True)` succeeds, so training cannot
+silently use a forward-only raw op.
+
+Current experimental forward limits are reported by `backend_info()`: fp16/bf16,
+head/value dimensions up to 128, expanded Q/K/V heads only, and no block-mask
+metadata path yet.
+
+SM90 uses the FlashAttention 3-compatible sparse path. SM86 is also a required
+target, but it needs an exact interval-aware sparse kernel path; stock FA2
+causal/window/padding controls are not sufficient for PE's state-autoregressive
+mask.
+
 By default, installs do not build the CUDA extension. The stub extension can be
 built from a CUDA-enabled PyTorch environment with:
 
@@ -71,16 +84,37 @@ CUTLASS_INCLUDE_DIR=/path/to/cutlass/include \
 uv pip install -e . --no-build-isolation -v
 ```
 
+For local SM86/Ampere validation, build the experimental SM8x interval kernel
+from a CUDA-enabled PyTorch environment. This path currently targets PE's
+non-causal `bound_num=2` interval mask and applies exact interval masking inside
+the SM80/86 FlashAttention mainloop; tile skipping is still the next kernel
+milestone.
+
+```bash
+FLASHMASK_BUILD_EXPERIMENTAL_SM8X_CUDA=1 \
+CUTLASS_HOME=/path/to/cutlass \
+uv pip install -e . --no-build-isolation -v
+```
+
 Backend discovery reports unavailable unless the extension is built and the
 active CUDA device can run the compiled sparse kernel.
 
-On an SM90 machine with the experimental extension built, run the local parity
-and timing harness with:
+On an SM90 / compute capability 9.0 machine with the experimental extension
+built, run the local parity and timing harness with:
 
 ```bash
-uv run flashmask-bench-sm90 --mode all --bench-seq-lens 2048 --heads 4 --head-dims 128 --dtypes fp16 --jsonl
+uv run flashmask-bench-sm90 --require-sm90 --mode all --bench-seq-lens 2048 --heads 4 --head-dims 128 --dtypes fp16 --min-speedup 1.15 --jsonl --output-jsonl artifacts/flashmask-sm90.jsonl
+uv run flashmask-validate-sm90-proof --min-speedup 1.15 --require-case bench artifacts/flashmask-sm90.jsonl
 ```
 
 It checks FlashMask output and LSE against a dense reference, confirms the
-`fa3` backend, verifies that `flashmask::fwd` appears in a profiler trace, and
-prints median FlashMask and dense SDPA timings.
+`fa3` backend, verifies that `flashmask::fwd` and the expected FlashMask CUDA
+kernel markers appear in a profiler trace, and records median public-API,
+raw-op, and dense SDPA timings.
+
+For CI or an explicit SM90 validation run, make optional GPU tests fail instead
+of skip when the backend is unavailable:
+
+```bash
+FLASHMASK_REQUIRE_SM90=1 uv run pytest -q tests/test_cuda_extension_optional.py tests/test_cuda_pe_parity_optional.py
+```

@@ -5,8 +5,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ._backend import extension_status, sparse_attention_forward
+from ._backend import (
+    SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
+    SPARSE_SM90_FA3_BACKEND_KIND,
+    extension_status,
+    sparse_attention_forward,
+)
 from .core import IntervalMask
+
+
+_SPARSE_BACKEND_KIND_BY_BACKEND = {
+    "fa3": SPARSE_SM90_FA3_BACKEND_KIND,
+    "fa2-compatible": SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
+}
 
 
 @dataclass(frozen=True)
@@ -27,6 +38,13 @@ class BackendInfo:
     is_fa3: bool
     supports_sparse_mask: bool
     supports_backward: bool
+    is_fa2_compatible: bool = False
+    supports_block_mask: bool = False
+    supports_native_gqa: bool = False
+    supported_dtypes: tuple[str, ...] = ()
+    max_head_dim: int | None = None
+    training_available: bool = False
+    backend_kind: str | None = None
     module_path: str | None = None
     unavailable_reason: str | None = None
 
@@ -34,23 +52,71 @@ class BackendInfo:
 def backend_info(*, backend: str = "fa3") -> BackendInfo:
     """Return backend availability without importing external training stacks.
 
-    The package currently ships the mask ABI and dense reference path only. A
-    real backend must report both FA3 compatibility and sparse-mask support; the
-    current hard-negative response lets integration tests fail closed instead of
+    The package ships the mask representation, dense reference path, and
+    optional backend loader. A real backend must report sparse-mask support for
+    the requested architecture; unsupported requests fail closed instead of
     accidentally treating a dense fallback as the fast path.
     """
 
     status = extension_status()
-    ready = bool(status.loaded and status.kernel_ready)
+    requested_kind = _backend_kind_for_name(backend)
+    is_fa3 = bool(status.loaded and status.backend_kind == SPARSE_SM90_FA3_BACKEND_KIND)
+    is_fa2_compatible = bool(
+        status.loaded and status.backend_kind == SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND
+    )
+    ready = bool(
+        requested_kind is not None
+        and status.backend_kind == requested_kind
+        and status.loaded
+        and status.kernel_ready
+        and status.forward_ready
+    )
+    known_sparse_backend = bool(is_fa3 or is_fa2_compatible)
+    supports_backward = bool(ready and status.backward_ready)
     return BackendInfo(
         name=str(backend),
         available=ready,
-        is_fa3=backend == "fa3",
+        is_fa3=is_fa3,
         supports_sparse_mask=ready,
-        supports_backward=False,
+        supports_backward=supports_backward,
+        is_fa2_compatible=is_fa2_compatible,
+        supports_block_mask=False,
+        supports_native_gqa=False,
+        supported_dtypes=("float16", "bfloat16") if known_sparse_backend else (),
+        max_head_dim=128 if known_sparse_backend else None,
+        training_available=supports_backward,
+        backend_kind=status.backend_kind,
         module_path=status.module_path,
-        unavailable_reason=None if ready else status.unavailable_reason,
+        unavailable_reason=_backend_unavailable_reason(
+            backend=backend,
+            requested_kind=requested_kind,
+            status=status,
+            ready=ready,
+        ),
     )
+
+
+def _backend_kind_for_name(backend: str) -> str | None:
+    return _SPARSE_BACKEND_KIND_BY_BACKEND.get(backend)
+
+
+def _backend_unavailable_reason(
+    *,
+    backend: str,
+    requested_kind: str | None,
+    status: Any,
+    ready: bool,
+) -> str | None:
+    if ready:
+        return None
+    if requested_kind is None:
+        return f"FlashMask attention backend {backend!r} is unknown"
+    if status.backend_kind and status.backend_kind != requested_kind:
+        return (
+            f"loaded backend kind {status.backend_kind!r} does not match "
+            f"requested backend {backend!r}"
+        )
+    return status.unavailable_reason
 
 
 def verify_backend(
@@ -101,12 +167,28 @@ def flashmask_attention(
         raise ValueError("causal and is_causal disagree")
     causal_override = causal if causal is not None else is_causal
 
-    info = backend_info(backend=backend)
-    if not info.available:
-        raise NotImplementedError(
-            info.unavailable_reason
-            or f"FlashMask attention backend {backend!r} is not implemented in this package yet"
+    if backend not in _SPARSE_BACKEND_KIND_BY_BACKEND:
+        supported = ", ".join(repr(name) for name in _SPARSE_BACKEND_KIND_BY_BACKEND)
+        raise ValueError(
+            f"FlashMask attention backend must be one of {supported}, got {backend!r}"
         )
+    requested_kind = _backend_kind_for_name(backend)
+    _validate_experimental_forward_limits(q, k, v, block_mask)
+    needs_backward = any(
+        bool(getattr(tensor, "requires_grad", False))
+        for tensor in (q, k, v)
+    )
+    try:
+        verify_backend(
+            backend=backend,
+            require_fa3=backend == "fa3",
+            require_sparse=True,
+            require_backward=needs_backward,
+        )
+    except RuntimeError as exc:
+        raise NotImplementedError(
+            str(exc) or f"FlashMask attention backend {backend!r} is not implemented"
+        ) from exc
 
     output, softmax_lse = sparse_attention_forward(
         q,
@@ -116,8 +198,44 @@ def flashmask_attention(
         softmax_scale=softmax_scale,
         block_mask=block_mask,
         causal=causal_override,
+        backend_kind=requested_kind,
     )
     return FlashMaskAttentionResult(output=output, softmax_lse=softmax_lse, backend=backend)
+
+
+def _validate_experimental_forward_limits(q: Any, k: Any, v: Any, block_mask: Any | None) -> None:
+    block_mask_numel = getattr(block_mask, "numel", None)
+    if block_mask is not None:
+        if not callable(block_mask_numel) or int(block_mask_numel()) != 0:
+            raise NotImplementedError("FlashMask experimental forward does not support block_mask yet")
+
+    q_shape = _shape_tuple(q)
+    k_shape = _shape_tuple(k)
+    v_shape = _shape_tuple(v)
+    if q_shape is None or k_shape is None or v_shape is None:
+        return
+    if len(q_shape) != 4 or len(k_shape) != 4 or len(v_shape) != 4:
+        return
+
+    if q_shape[2] != k_shape[2] or k_shape[2] != v_shape[2]:
+        raise NotImplementedError("FlashMask experimental forward does not support native GQA yet")
+    if q_shape[3] > 128:
+        raise NotImplementedError("FlashMask experimental forward supports head_dim <= 128 only")
+    if v_shape[3] > 128:
+        raise NotImplementedError("FlashMask experimental forward supports value head_dim <= 128 only")
+
+
+def _shape_tuple(tensor: Any) -> tuple[int, ...] | None:
+    shape = getattr(tensor, "shape", None)
+    if shape is not None:
+        return tuple(int(dim) for dim in shape)
+    size = getattr(tensor, "size", None)
+    if callable(size):
+        try:
+            return tuple(int(dim) for dim in size())
+        except TypeError:
+            return None
+    return None
 
 
 def dense_fallback_is_not_fast_path() -> None:

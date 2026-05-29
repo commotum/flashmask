@@ -15,8 +15,31 @@ class ExtensionStatus:
 
     loaded: bool
     kernel_ready: bool
+    forward_ready: bool = False
+    backward_ready: bool = False
+    backend_kind: str | None = None
     module_path: str | None = None
     unavailable_reason: str | None = None
+
+
+SPARSE_SM90_FA3_BACKEND_KIND = "sm90_sparse_fa3"
+SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND = "sm8x_sparse_fa2_compatible"
+SPARSE_FA3_BACKEND_KIND = SPARSE_SM90_FA3_BACKEND_KIND
+
+SUPPORTED_SPARSE_BACKEND_KINDS = frozenset(
+    {
+        SPARSE_SM90_FA3_BACKEND_KIND,
+        SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
+    }
+)
+REPRESENTABLE_SPARSE_BACKEND_KINDS = frozenset(
+    {
+        SPARSE_SM90_FA3_BACKEND_KIND,
+        SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
+    }
+)
+
+_EMPTY_BLOCK_MASK_CACHE: dict[tuple[int, int, str], Any] = {}
 
 
 def extension_status() -> ExtensionStatus:
@@ -35,14 +58,35 @@ def extension_status() -> ExtensionStatus:
         )
 
     ready_fn = getattr(module, "kernel_ready", None)
-    ready = bool(ready_fn()) if callable(ready_fn) else False
+    forward_ready_fn = getattr(module, "forward_ready", None)
+    backward_ready_fn = getattr(module, "backward_ready", None)
+    kind_fn = getattr(module, "backend_kind", None)
+    reported_ready = bool(ready_fn()) if callable(ready_fn) else False
+    reported_forward_ready = (
+        bool(forward_ready_fn()) if callable(forward_ready_fn) else reported_ready
+    )
+    reported_backward_ready = bool(backward_ready_fn()) if callable(backward_ready_fn) else False
+    backend_kind = str(kind_fn()) if callable(kind_fn) else None
+    supported_backend_kind = backend_kind in SUPPORTED_SPARSE_BACKEND_KINDS
+    ready = bool(reported_ready and supported_backend_kind)
+    forward_ready = bool(reported_forward_ready and supported_backend_kind)
+    backward_ready = bool(reported_backward_ready and supported_backend_kind)
+    unavailable_reason = None
+    if backend_kind not in REPRESENTABLE_SPARSE_BACKEND_KINDS:
+        unavailable_reason = f"compiled extension backend kind {backend_kind!r} is not supported"
+    elif not reported_ready or not reported_forward_ready:
+        unavailable_reason = (
+            "compiled extension is present but no compatible sparse kernel "
+            "is available for the current device"
+        )
     return ExtensionStatus(
         loaded=True,
         kernel_ready=ready,
+        forward_ready=forward_ready,
+        backward_ready=backward_ready,
+        backend_kind=backend_kind,
         module_path=getattr(module, "__file__", None),
-        unavailable_reason=None
-        if ready
-        else "compiled extension is present but no compatible sparse FA3 kernel is available for the current device",
+        unavailable_reason=unavailable_reason,
     )
 
 
@@ -55,25 +99,27 @@ def sparse_attention_forward(
     softmax_scale: float | None = None,
     block_mask: Any | None = None,
     causal: bool | None = None,
+    backend_kind: str = SPARSE_SM90_FA3_BACKEND_KIND,
 ) -> tuple[Any, Any]:
-    """Call the compiled forward op once the sparse FA3 kernel is available."""
+    """Call the compiled forward op once the requested sparse kernel is available."""
 
     status = extension_status()
-    if not status.loaded or not status.kernel_ready:
+    if (
+        not status.loaded
+        or not status.kernel_ready
+        or not status.forward_ready
+        or status.backend_kind != backend_kind
+    ):
         raise NotImplementedError(
-            status.unavailable_reason or "FlashMask sparse FA3 backend is not available"
+            status.unavailable_reason or f"FlashMask sparse backend {backend_kind!r} is not available"
         )
     _validate_interval_mask_call(q, mask, causal)
 
     import torch
 
-    startend = torch.as_tensor(
-        mask.to_list(),
-        dtype=torch.int32,
-        device=q.device,
-    )
+    startend = _startend_tensor_for_device(torch, mask, q.device)
     if block_mask is None:
-        block_mask = torch.empty(0, dtype=torch.int32, device=q.device)
+        block_mask = _empty_block_mask_for_device(torch, q.device)
     elif not hasattr(block_mask, "device"):
         block_mask = torch.as_tensor(block_mask, dtype=torch.int32, device=q.device)
 
@@ -86,6 +132,34 @@ def sparse_attention_forward(
         float("nan") if softmax_scale is None else float(softmax_scale),
         bool(mask.causal if causal is None else causal),
     )
+
+
+def _startend_tensor_for_device(torch: Any, mask: IntervalMask, device: Any) -> Any:
+    cache_key = str(device)
+    cache = getattr(mask, "_torch_startend_cache", None)
+    if cache is None:
+        cache = {}
+        object.__setattr__(mask, "_torch_startend_cache", cache)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+    startend = torch.as_tensor(
+        mask.to_list(),
+        dtype=torch.int32,
+        device=device,
+    )
+    cache[cache_key] = startend
+    return startend
+
+
+def _empty_block_mask_for_device(torch: Any, device: Any) -> Any:
+    cache_key = (id(torch), id(getattr(torch, "empty", None)), str(device))
+    cached = _EMPTY_BLOCK_MASK_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    block_mask = torch.empty(0, dtype=torch.int32, device=device)
+    _EMPTY_BLOCK_MASK_CACHE[cache_key] = block_mask
+    return block_mask
 
 
 def _validate_interval_mask_call(q: Any, mask: IntervalMask, causal: bool | None) -> None:
@@ -114,6 +188,10 @@ def _validate_interval_mask_call(q: Any, mask: IntervalMask, causal: bool | None
 
 
 def _validate_interval_order(mask: IntervalMask) -> None:
+    cache_key = (mask.causal, mask.shape)
+    if getattr(mask, "_interval_order_validated", None) == cache_key:
+        return
+
     if mask.causal and mask.bound_num not in (1, 2):
         raise ValueError("causal IntervalMask requires bound_num 1 or 2")
     if not mask.causal and mask.bound_num not in (2, 4):
@@ -130,6 +208,7 @@ def _validate_interval_order(mask: IntervalMask) -> None:
                         _raise_bad_interval_order(b_idx, h_idx, k_idx, bounds)
                 elif bounds[1] < bounds[0] or bounds[3] < bounds[2]:
                     _raise_bad_interval_order(b_idx, h_idx, k_idx, bounds)
+    object.__setattr__(mask, "_interval_order_validated", cache_key)
 
 
 def _raise_bad_interval_order(

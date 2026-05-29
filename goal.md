@@ -1,6 +1,6 @@
 # Goal
 
-Build `flashmask` as a small standalone package that PE can depend on for fast FlashAttention 3-compatible sparse attention masks.
+Build `flashmask` as a small standalone package that PE can depend on for fast FlashAttention-compatible sparse attention masks on both SM90 and SM86-class NVIDIA GPUs.
 
 ## Boundary
 
@@ -11,7 +11,7 @@ Build `flashmask` as a small standalone package that PE can depend on for fast F
 
 ## Execution Priority
 
-The kernel is the critical path. Build and verify the FlashAttention 3-compatible sparse forward kernel before expanding PE integration beyond a minimal fail-closed adapter. PE should be used as the downstream correctness and benchmark harness after the kernel path is real.
+The kernel is the critical path. Build and verify kernel-native sparse forward paths before expanding PE integration beyond a minimal fail-closed adapter. SM90 should use the FlashAttention 3-compatible path. SM86 must use an exact sparse interval path, likely FA2-compatible or custom, rather than stock FA2 masking. PE should be used as the downstream correctness and benchmark harness after the kernel path is real.
 
 ## Primary Behavior
 
@@ -32,8 +32,10 @@ The mask representation must also support the structured interval-style masks re
 - A dense reference path reconstructs the equivalent dense attention mask from the sparse representation for correctness tests.
 - PE's FlashMask path matches the existing dense SDPA path on logits/loss within agreed numerical tolerance for representative next-state batches.
 - Tests cover the primary PE next-state mask and the structured mask families in `context/masks.py`.
-- The fast path calls a FA3-compatible kernel-native sparse attention implementation rather than dense SDPA with an attention mask.
+- The fast path calls a kernel-native sparse attention implementation rather than dense SDPA with an attention mask.
+- SM90 validation verifies the FlashAttention 3-compatible sparse path.
+- SM86 validation verifies an exact sparse interval kernel path that preserves PE semantics; stock FA2 causal/window/padding masks are not sufficient.
 - GPU integration tests run from the PE repo and verify FlashMask produces scores/logits/losses identical to the dense implementation within tolerance.
-- GPU integration tests verify the FlashMask path actually uses FlashAttention 3.
+- GPU integration tests verify the FlashMask path actually uses the intended kernel backend for the active GPU architecture.
 - Benchmarks from the PE repo show the FlashMask path is materially faster than the dense SDPA mask path on representative next-state workloads.
 - The package can be installed, imported, tested, and used without importing large external training frameworks.

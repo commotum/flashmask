@@ -7,6 +7,12 @@ from .attention import (
     flashmask_attention,
     verify_backend,
 )
+from ._backend import (
+    REPRESENTABLE_SPARSE_BACKEND_KINDS,
+    SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
+    SPARSE_SM90_FA3_BACKEND_KIND,
+    SUPPORTED_SPARSE_BACKEND_KINDS,
+)
 from .builders import (
     causal_mask,
     document_mask,
@@ -32,6 +38,11 @@ from .pe import (
     dense_pe_state_causal_mask,
     dense_pe_state_causal_query_mask,
 )
+from .proof import (
+    ProofValidationError,
+    validate_sm90_proof_jsonl,
+    validate_sm90_proof_records,
+)
 
 __all__ = [
     "DEFAULT_PE_TOKEN_TYPES",
@@ -41,6 +52,11 @@ __all__ = [
     "MaskNotRepresentableError",
     "NO_STATE_TIME",
     "PETokenTypeIds",
+    "ProofValidationError",
+    "REPRESENTABLE_SPARSE_BACKEND_KINDS",
+    "SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND",
+    "SPARSE_SM90_FA3_BACKEND_KIND",
+    "SUPPORTED_SPARSE_BACKEND_KINDS",
     "backend_info",
     "causal_mask",
     "compile_dense_bool_mask",
@@ -57,5 +73,7 @@ __all__ = [
     "normalize_startend_row_indices",
     "prefix_lm_mask",
     "sliding_window_mask",
+    "validate_sm90_proof_jsonl",
+    "validate_sm90_proof_records",
     "verify_backend",
 ]

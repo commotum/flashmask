@@ -24,9 +24,14 @@ tests that should synchronously check raw interval tensors before launch.
 
 `flashmask_v2/` contains the CUDA source snapshot being ported into this
 standalone extension. The current experimental kernel build target is a narrow
-SM90-only sparse forward path for head_dim96/head_dim128 fp16/bf16, and it requires a
-matching CUTLASS include directory supplied through `CUTLASS_INCLUDE_DIR` or
-`FLASHMASK_CUTLASS_INCLUDE_DIR`. SM80/86 remains disabled for this sparse path
-until its forward mainloop has a FlashMask metadata implementation; attempting
-to instantiate the SM80/86 sparse path is compile-gated so it cannot silently
-fall back to dense attention.
+SM90 / compute capability 9.0 sparse forward path for head_dim96/head_dim128
+fp16/bf16, and it requires a matching CUTLASS include directory supplied
+through `CUTLASS_INCLUDE_DIR` or `FLASHMASK_CUTLASS_INCLUDE_DIR`.
+
+SM86 support is also a required target, but it must be exact and kernel-native:
+stock FA2 causal/window/padding masks do not express PE's per-key query-row
+interval semantics. The current SM8x build reuses the vendored SM80/86
+FlashAttention mainloop with FlashMask interval metadata threaded into the
+kernel. It applies exact per-score interval masking inside the kernel for PE's
+non-causal `bound_num=2` state-autoregressive mask, but it is not yet the final
+tile-skipping implementation needed for the speed goal.

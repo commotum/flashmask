@@ -20,6 +20,16 @@ namespace flash {
 
 using namespace cute;
 
+template <class ArchTag, class StrideO, class Element, bool UseSm90 = (ArchTag::kMinComputeCapability >= 90)>
+struct SmemStoreOpSelector {
+    using type = AutoVectorizingCopyWithAssumedAlignment<128>;
+};
+
+template <class ArchTag, class StrideO, class Element>
+struct SmemStoreOpSelector<ArchTag, StrideO, Element, true> {
+    using type = decltype(cutlass::epilogue::collective::detail::sm90_get_smem_store_op_for_accumulator<StrideO, Element>());
+};
+
 template <class TileShape_MNK_PV_, class ClusterShape_, class Element_, class ArchTag_,
           int NumEpilogueThreads_, bool Varlen_, bool PackGQA_, bool Split_, bool FP8PermuteCol=false>
 struct CollectiveEpilogueFwd {
@@ -89,12 +99,8 @@ struct CollectiveEpilogueFwd {
     using ShapeLSEPacked = std::conditional_t<!PackGQA, cute::Shape<int32_t, int32_t, int32_t, int32_t>, cute::Shape<cute::Shape<int32_t, int32_t>, int32_t, int32_t, int32_t>>;
     using StrideLSEPacked = std::conditional_t<!PackGQA, StrideLSE, cute::Stride<cute::Stride<int64_t, _1>, int64_t, int64_t, int64_t>>;
 
-    using CopyOpR2S = std::conditional_t<
-        ArchTag::kMinComputeCapability >= 90,
-        // cute::SM90_U32x4_STSM_N if Element size is 2 bytes (fp16, bf16)
-        decltype(cutlass::epilogue::collective::detail::sm90_get_smem_store_op_for_accumulator<StrideO, Element>()),
-        AutoVectorizingCopyWithAssumedAlignment<128>
-    >;
+    // cute::SM90_U32x4_STSM_N if Element size is 2 bytes (fp16, bf16).
+    using CopyOpR2S = typename SmemStoreOpSelector<ArchTag, StrideO, Element>::type;
     using SmemCopyAtomO = Copy_Atom<CopyOpR2S, Element>;
 
     // static constexpr size_t SmemAlignmentO = cutlass::detail::alignment_for_swizzle(SmemLayoutO{});

@@ -1,0 +1,8 @@
+recursive-include src/flashmask/csrc *
+prune context
+prune documentation
+prune paper
+prune sub
+prune tests
+prune uv-docs
+exclude summary_flashmask.md

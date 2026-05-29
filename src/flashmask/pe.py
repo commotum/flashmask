@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .core import IntervalMask, compile_dense_bool_mask
+from .core import IntervalMask, MaskNotRepresentableError
 
 
 @dataclass(frozen=True)
@@ -41,13 +41,15 @@ def compile_pe_state_causal_mask(
     PE's dense state-causal policy for the same metadata.
     """
 
-    dense = dense_pe_state_causal_mask(
+    return compile_pe_state_causal_query_mask(
+        token_type_id,
+        time_index,
         token_type_id,
         time_index,
         valid_token,
+        mask_heads=mask_heads,
         token_types=token_types,
     )
-    return compile_dense_bool_mask(dense, mask_heads=mask_heads, bound_num=2)
 
 
 def compile_pe_state_causal_query_mask(
@@ -62,15 +64,43 @@ def compile_pe_state_causal_query_mask(
 ) -> IntervalMask:
     """Compile PE query/key metadata for incremental attention blocks."""
 
-    dense = dense_pe_state_causal_query_mask(
-        query_token_type_id,
-        query_time_index,
-        key_token_type_id,
-        key_time_index,
-        key_valid_token,
-        token_types=token_types,
+    query_type = _normalize_2d_int("query_token_type_id", query_token_type_id)
+    query_time = _normalize_2d_int("query_time_index", query_time_index)
+    key_type = _normalize_2d_int("key_token_type_id", key_token_type_id)
+    key_time = _normalize_2d_int("key_time_index", key_time_index)
+    _check_same_shape("query_token_type_id", query_type, "query_time_index", query_time)
+    _check_same_shape("key_token_type_id", key_type, "key_time_index", key_time)
+    if len(query_type) != len(key_type):
+        raise ValueError(
+            f"query/key batch sizes must match, got {len(query_type)} and {len(key_type)}"
+        )
+    mask_heads = int(mask_heads)
+    if mask_heads <= 0:
+        raise ValueError(f"mask_heads must be positive, got {mask_heads}")
+
+    key_valid = (
+        _token_type_valid(key_type, token_types)
+        if key_valid_token is None
+        else _normalize_2d_bool("key_valid_token", key_valid_token)
     )
-    return compile_dense_bool_mask(dense, mask_heads=mask_heads, bound_num=2)
+    _check_same_shape("key_token_type_id", key_type, "key_valid_token", key_valid)
+
+    startend = []
+    for batch_idx in range(len(query_type)):
+        head_bounds = []
+        for key_idx, current_key_type in enumerate(key_type[batch_idx]):
+            head_bounds.append(
+                _pe_query_interval_for_key(
+                    query_type=query_type[batch_idx],
+                    query_time=query_time[batch_idx],
+                    key_type=current_key_type,
+                    key_time=key_time[batch_idx][key_idx],
+                    key_valid=key_valid[batch_idx][key_idx],
+                    token_types=token_types,
+                )
+            )
+        startend.append(tuple(tuple(head_bounds) for _ in range(mask_heads)))
+    return IntervalMask(tuple(startend), causal=False, seqlen_q=len(query_type[0]))
 
 
 def dense_pe_state_causal_mask(
@@ -179,6 +209,44 @@ def _pe_allows(
     return False
 
 
+def _pe_query_interval_for_key(
+    *,
+    query_type: list[int],
+    query_time: list[int],
+    key_type: int,
+    key_time: int,
+    key_valid: bool,
+    token_types: PETokenTypeIds,
+) -> tuple[int, int]:
+    start: int | None = None
+    end: int | None = None
+    closed = False
+    for query_idx, current_query_type in enumerate(query_type):
+        allowed = _pe_allows(
+            query_type=current_query_type,
+            query_time=query_time[query_idx],
+            key_type=key_type,
+            key_time=key_time,
+            key_valid=key_valid,
+            token_types=token_types,
+        )
+        if allowed:
+            if closed:
+                raise MaskNotRepresentableError(
+                    "PE query/key metadata produces a non-contiguous allowed "
+                    f"query interval for key_type={key_type}, key_time={key_time}"
+                )
+            if start is None:
+                start = query_idx
+            end = query_idx + 1
+        elif start is not None:
+            closed = True
+
+    if start is None or end is None:
+        return (0, 0)
+    return (end, start)
+
+
 def _normalize_2d_int(name: str, value: Any) -> list[list[int]]:
     if hasattr(value, "tolist"):
         value = value.tolist()
@@ -225,4 +293,3 @@ def _token_type_valid(
     token_types: PETokenTypeIds,
 ) -> list[list[bool]]:
     return [[token_type != token_types.pad for token_type in row] for row in token_type_id]
-
