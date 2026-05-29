@@ -3,9 +3,9 @@
 ## Pasteable Goal
 
 Expose one public FlashMask attention API with an internal backend router that
-selects the current SM80/SM86 exact sparse interval backend on supported local
-hardware, while keeping SM90 FA3-compatible routing as a templated,
-fail-closed Hopper path. See
+selects the verified SM86 exact sparse interval backend on the current local
+hardware, while keeping SM80 and SM90/Hopper routes as templated,
+hard-gated paths until their hardware proof exists. See
 `/home/jake/Developer/flashmask/goal/phase-5-backend-router.md` for the
 detailed scope, tests, and exit criteria.
 
@@ -25,12 +25,47 @@ metadata, architecture checks, and hard-gated H100/H200 validation commands
 should exist, but real SM90 runtime routing is not a current completion
 criterion until Hopper hardware is available.
 
+## Phase 4 Handoff
+
+Phase 4 completion evidence is recorded in
+`/home/jake/Developer/flashmask/goal/phase-4-completion-audit.md`.
+
+The locally verified training-capable backend is:
+
+```text
+backend: fa2-compatible / sm8x_sparse_fa2_compatible
+device: SM86, compute capability 8.6
+dtype: fp16, bf16
+head_dim dispatch groups: 96, 128
+mask: PE non-causal state-autoregressive bound_num=2 interval masks
+forward: implemented and verified
+backward: implemented and verified
+training: PE tiny training smoke passes
+```
+
+Existing public surfaces from Phases 2-4 include `flashmask_attention`,
+`backend_info`, `verify_backend`, `torch.ops.flashmask.fwd`, and
+`torch.ops.flashmask.bwd`. Phase 5 should refine these into a real router
+instead of replacing them wholesale.
+
+Important current gaps that Phase 5 owns:
+
+- `backend="auto"` is not yet the default public routing behavior.
+- `sm90-fa3` and `sm8x-fa2-compatible` aliases are not yet first-class public
+  backend names.
+- backend metadata does not yet distinguish requested versus selected backend
+  names as separate fields.
+- SM80 runtime readiness is not proven even though SM80 cubins/metadata may be
+  present in the SM8x build.
+
 ## Non-Goals
 
 - Do not add dense SDPA fallback to make unsupported machines "work".
 - Do not hide architecture or backend mismatch errors.
-- Do not make PE responsible for choosing SM90 versus SM80/SM86 kernels.
+- Do not make PE responsible for choosing SM90 versus SM86 implementation
+  details.
 - Do not report a backend as training-capable unless backward is ready.
+- Do not claim SM80 runtime readiness from SM86/A6000 test results.
 
 ## Public Shape
 
@@ -79,9 +114,15 @@ The public API should distinguish:
 
 For `backend="auto"`:
 
-- SM80/SM86:
+- SM86 / compute capability 8.6:
   - route to `sm8x_sparse_fa2_compatible` if compiled and forward-ready
-  - fail closed if the SM80/SM86 backend is not compiled or not ready
+  - for training or grad-tracked Q/K/V, require `backward_ready=True`
+  - fail closed if the SM86 backend is not compiled or not ready
+- SM80 / compute capability 8.0:
+  - keep the route to `sm8x_sparse_fa2_compatible` defined for later SM80
+    validation
+  - fail closed unless separate SM80 hardware proof has marked that runtime
+    route ready
 - SM90 / compute capability 9.0:
   - keep the route to `sm90_sparse_fa3` defined for later Hopper validation
   - fail closed if the SM90 backend is not compiled, not ready, or not
@@ -95,8 +136,9 @@ For explicit backend requests:
 
 - `fa3`/`sm90-fa3` requires SM90, the FA3-compatible sparse backend, and
   deferred Hopper proof before it may be treated as runtime-ready.
-- `fa2-compatible`/`sm8x-fa2-compatible` requires a supported SM80/SM86-class
-  GPU and the exact sparse interval backend.
+- `fa2-compatible`/`sm8x-fa2-compatible` currently requires verified SM86
+  hardware and the exact sparse interval backend. SM80 support must remain
+  hard-gated until SM80 proof exists.
 - architecture mismatch must fail clearly.
 - build mismatch must fail clearly.
 
@@ -124,6 +166,7 @@ info = backend_info()
 
 Minimum fields:
 
+- `name` or another backwards-compatible alias for the requested backend
 - `requested_backend`
 - `selected_backend`
 - `backend_kind`
@@ -137,6 +180,9 @@ Minimum fields:
 - `supports_sm8x`
 - `supports_native_gqa`
 - `supports_block_mask`
+
+Existing `BackendInfo` fields should remain source-compatible unless there is a
+deliberate migration with tests.
 
 Also expose:
 
@@ -234,7 +280,8 @@ PE may:
 
 Required tests:
 
-- `auto` selects SM80/SM86 backend on mocked SM86 capability.
+- `auto` selects the SM86 backend on mocked SM86 capability.
+- `auto` does not claim SM80 readiness without a mocked SM80 proof flag/state.
 - SM90 alias/routing metadata is present and can be tested with mocks, but
   real SM90 runtime routing is deferred until Hopper validation.
 - unsupported capability fails clearly.
@@ -266,25 +313,32 @@ uv run pytest -q
 Optional GPU router tests:
 
 ```bash
-FLASHMASK_REQUIRE_SM8X=1 uv run pytest -q tests/test_cuda_extension_optional.py
+cd /home/jake/Developer/pe
+FLASHMASK_REQUIRE_SM8X=1 uv run --extra gpu pytest -q \
+  /home/jake/Developer/flashmask/tests/test_cuda_extension_optional.py
+FLASHMASK_REQUIRE_SM86=1 uv run --extra gpu pytest -q \
+  /home/jake/Developer/flashmask/tests/test_cuda_extension_optional.py
 ```
 
 Deferred Hopper router proof:
 
 ```bash
-FLASHMASK_REQUIRE_SM90=1 uv run pytest -q tests/test_cuda_extension_optional.py
+FLASHMASK_REQUIRE_SM90=1 uv run --extra gpu pytest -q tests/test_cuda_extension_optional.py
 ```
 
 PE-side routing tests after integration:
 
 ```bash
+cd /home/jake/Developer/pe
 PYTHONPATH=/home/jake/Developer/flashmask/src uv run --extra gpu pytest -q tests/test_attention.py tests/test_flashmask_gpu_parity.py
+PYTHONPATH=/home/jake/Developer/flashmask/src PE_REQUIRE_FLASHMASK_SM8X=1 uv run --extra gpu pytest -q tests/test_train.py tests/test_flashmask_sm8x_gpu_parity.py
 ```
 
 ## Exit Criteria
 
-- Tests prove backend selection for the current supported SM80/SM86-class
-  architecture.
+- Tests prove backend selection for the current supported SM86 architecture.
+- Tests prove SM80 and SM90 routes remain fail-closed until their separate
+  hardware proof exists.
 - Tests prove explicit backend mismatch fails clearly.
 - Tests prove missing forward/backward readiness fails closed.
 - Tests prove no dense fallback is reachable through FlashMask backends.
