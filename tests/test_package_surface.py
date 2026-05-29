@@ -689,6 +689,9 @@ def test_extension_status_is_lazy():
             SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND,
         }
         assert status.forward_ready is True
-        assert status.backward_ready is False
+        if status.backend_kind == SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND:
+            assert isinstance(status.backward_ready, bool)
+        else:
+            assert status.backward_ready is False
     else:
         assert status.unavailable_reason is not None

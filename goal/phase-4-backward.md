@@ -20,6 +20,9 @@ Phase 3 completion evidence is recorded in
 path must preserve the same interval-mask semantics and must not route through
 dense masked attention as a hidden fallback.
 
+Phase 4 completion evidence is recorded in
+`/home/jake/Developer/flashmask/goal/phase-4-completion-audit.md`.
+
 SM90/Hopper backward work in this phase is a template/scaffold only: keep the
 source references, build hooks, metadata fields, fail-closed architecture gates,
 and hard-gated validation commands ready for later H100/H200 access. SM90

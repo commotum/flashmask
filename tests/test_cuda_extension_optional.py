@@ -47,6 +47,7 @@ def test_compiled_extension_device_gate_when_present():
     capability = torch.cuda.get_device_capability()
     capability_tuple = tuple(capability)
     ready = bool(extension.kernel_ready())
+    backward_ready = bool(extension.backward_ready())
     backend_kind = str(extension.backend_kind())
     if os.environ.get("FLASHMASK_REQUIRE_SM8X") == "1" and (
         capability_tuple not in SUPPORTED_SM8X_CAPABILITIES
@@ -98,6 +99,10 @@ def test_compiled_extension_device_gate_when_present():
                 assert SUPPORTED_SM8X_CAPABILITIES <= supported
             else:
                 assert (9, 0) in supported
+        if backend_kind == flashmask.SPARSE_SM8X_FA2_COMPAT_BACKEND_KIND:
+            assert backward_ready is True
+        else:
+            assert backward_ready is False
 
     q = torch.randn(1, 4, 1, 128, device="cuda", dtype=torch.float16)
     k = torch.randn(1, 4, 1, 128, device="cuda", dtype=torch.float16)
@@ -214,6 +219,20 @@ def _dense_reference(torch, q, k, v, mask):
     return out, torch.logsumexp(scores, dim=-1), scale
 
 
+def _dense_reference_grads(torch, q, k, v, mask, dout):
+    scale = 1.0 / math.sqrt(q.size(-1))
+    allowed = torch.tensor(mask.to_bool_mask(nheads=q.size(2)), device=q.device)
+    q_ref = q.detach().float().requires_grad_(True)
+    k_ref = k.detach().float().requires_grad_(True)
+    v_ref = v.detach().float().requires_grad_(True)
+    scores = torch.einsum("bqhd,bkhd->bhqk", q_ref, k_ref) * scale
+    probs = torch.softmax(scores.masked_fill(~allowed, -torch.inf), dim=-1)
+    out = torch.einsum("bhqk,bkhd->bqhd", probs, v_ref)
+    loss = (out * dout.detach().float()).sum()
+    loss.backward()
+    return q_ref.grad, k_ref.grad, v_ref.grad
+
+
 def _assert_flashmask_raw_matches_dense(torch, q, k, v, mask):
     startend = torch.as_tensor(mask.to_list(), device="cuda", dtype=torch.int32)
     block_mask = torch.empty(0, device="cuda", dtype=torch.int32)
@@ -233,6 +252,44 @@ def _assert_flashmask_raw_matches_dense(torch, q, k, v, mask):
     rtol = 6e-2 if q.dtype == torch.bfloat16 else 3e-2
     torch.testing.assert_close(out.float(), expected_out, atol=atol, rtol=rtol)
     torch.testing.assert_close(lse.float(), expected_lse, atol=atol, rtol=rtol)
+
+
+def _assert_flashmask_raw_backward_matches_dense(torch, q, k, v, mask, *, seed):
+    startend = torch.as_tensor(mask.to_list(), device="cuda", dtype=torch.int32)
+    block_mask = torch.empty(0, device="cuda", dtype=torch.int32)
+    scale = 1.0 / math.sqrt(q.size(-1))
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+    dout = torch.randn(q.size(0), q.size(1), q.size(2), v.size(3), device="cuda", dtype=q.dtype, generator=generator)
+
+    out, lse = torch.ops.flashmask.fwd(
+        q.contiguous(),
+        k.contiguous(),
+        v.contiguous(),
+        startend,
+        block_mask,
+        scale,
+        mask.causal,
+    )
+    dq, dk, dv = torch.ops.flashmask.bwd(
+        dout.contiguous(),
+        q.contiguous(),
+        k.contiguous(),
+        v.contiguous(),
+        out.contiguous(),
+        lse.contiguous(),
+        startend,
+        block_mask,
+        scale,
+        mask.causal,
+        False,
+    )
+    expected_dq, expected_dk, expected_dv = _dense_reference_grads(torch, q, k, v, mask, dout)
+
+    atol = 1.5e-1 if q.dtype == torch.bfloat16 else 6e-2
+    rtol = 1.5e-1 if q.dtype == torch.bfloat16 else 6e-2
+    torch.testing.assert_close(dq.float(), expected_dq, atol=atol, rtol=rtol)
+    torch.testing.assert_close(dk.float(), expected_dk, atol=atol, rtol=rtol)
+    torch.testing.assert_close(dv.float(), expected_dv, atol=atol, rtol=rtol)
 
 
 def _time_cuda_ms(torch, fn, *, warmup=5, iters=30, repeats=3):
@@ -391,51 +448,96 @@ def test_optional_sm8x_rejects_unsupported_mask_kinds():
         torch.ops.flashmask.fwd(q, k, v, bound4_startend, block_mask, float("nan"), bound4.causal)
 
 
-def test_optional_sm8x_pe_backward_path_fails_closed():
+@pytest.mark.parametrize(
+    ("case_name", "dtype_name", "heads", "head_dim", "seed", "mask_factory"),
+    [
+        ("full_sequence_multibatch_broadcast", "float16", 6, 96, 101, _sm8x_full_sequence_multibatch_mask),
+        ("cached_query_multibatch_bf16", "bfloat16", 4, 128, 102, _sm8x_cached_query_multibatch_mask),
+    ],
+)
+def test_optional_sm8x_raw_backward_matches_dense_reference_matrix(
+    case_name,
+    dtype_name,
+    heads,
+    head_dim,
+    seed,
+    mask_factory,
+):
     torch = _require_sm8x_raw_op()
 
     import flashmask._C as extension
 
-    assert bool(extension.backward_ready()) is False
+    assert bool(extension.backward_ready()) is True
 
-    generator = torch.Generator(device="cuda").manual_seed(87)
+    dtype = getattr(torch, dtype_name)
+    mask = mask_factory()
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+    batch, mask_heads, seqlen_k, _bound_num = mask.shape
+    assert heads % mask_heads == 0
     q = torch.randn(
-        1, 6, 2, 64, device="cuda", dtype=torch.float16, generator=generator
+        batch,
+        mask.seqlen_q,
+        heads,
+        head_dim,
+        device="cuda",
+        dtype=dtype,
+        generator=generator,
     )
     k = torch.randn(
-        1, 6, 2, 64, device="cuda", dtype=torch.float16, generator=generator
+        batch,
+        seqlen_k,
+        heads,
+        head_dim,
+        device="cuda",
+        dtype=dtype,
+        generator=generator,
     )
     v = torch.randn(
-        1, 6, 2, 64, device="cuda", dtype=torch.float16, generator=generator
+        batch,
+        seqlen_k,
+        heads,
+        head_dim,
+        device="cuda",
+        dtype=dtype,
+        generator=generator,
     )
-    out = torch.randn_like(q)
-    dout = torch.randn_like(out)
-    softmax_lse = torch.randn(
-        1, 2, 6, device="cuda", dtype=torch.float32, generator=generator
-    )
+
+    _assert_flashmask_raw_backward_matches_dense(torch, q, k, v, mask, seed=seed + 1000)
+
+
+def test_optional_sm8x_public_autograd_matches_dense_reference():
+    torch = _require_sm8x_raw_op()
+
+    import flashmask._C as extension
+
+    assert bool(extension.backward_ready()) is True
+
+    generator = torch.Generator(device="cuda").manual_seed(87)
+    q = torch.randn(1, 6, 2, 64, device="cuda", dtype=torch.float16, generator=generator).requires_grad_(True)
+    k = torch.randn(1, 6, 2, 64, device="cuda", dtype=torch.float16, generator=generator).requires_grad_(True)
+    v = torch.randn(1, 6, 2, 64, device="cuda", dtype=torch.float16, generator=generator).requires_grad_(True)
+    dout = torch.randn_like(q)
     mask = flashmask.compile_pe_state_causal_mask(
         token_type_id=[[1, 2, 3, 3, 3, 3]],
         time_index=[[-1, -1, 0, 0, 1, 2]],
         valid_token=[[True, True, True, True, True, True]],
         mask_heads=1,
     )
-    startend = torch.as_tensor(mask.to_list(), device="cuda", dtype=torch.int32)
-    block_mask = torch.empty(0, device="cuda", dtype=torch.int32)
 
-    with pytest.raises(RuntimeError, match="backward kernel is not implemented"):
-        torch.ops.flashmask.bwd(
-            dout,
-            q,
-            k,
-            v,
-            out,
-            softmax_lse,
-            startend,
-            block_mask,
-            float("nan"),
-            mask.causal,
-            False,
-        )
+    info = flashmask.verify_backend(
+        backend="fa2-compatible",
+        require_fa3=False,
+        require_sparse=True,
+        require_backward=True,
+    )
+    assert info.supports_backward is True
+    result = flashmask.flashmask_attention(q, k, v, mask, backend="fa2-compatible")
+    (result.output.float() * dout.float()).sum().backward()
+
+    expected_dq, expected_dk, expected_dv = _dense_reference_grads(torch, q.detach(), k.detach(), v.detach(), mask, dout)
+    torch.testing.assert_close(q.grad.float(), expected_dq, atol=6e-2, rtol=6e-2)
+    torch.testing.assert_close(k.grad.float(), expected_dk, atol=6e-2, rtol=6e-2)
+    torch.testing.assert_close(v.grad.float(), expected_dv, atol=6e-2, rtol=6e-2)
 
 
 def test_optional_sm8x_profiles_flashmask_sparse_kernels():
@@ -472,6 +574,45 @@ def test_optional_sm8x_profiles_flashmask_sparse_kernels():
     assert "flashmask::fwd" in event_names
     assert any("scanMaxMin" in name for name in event_names)
     assert any("cutlass_flashmask_kernel" in name for name in event_names)
+    assert not any("scaled_dot_product" in name for name in event_names)
+    assert not any(name in {"aten::matmul", "aten::softmax"} for name in event_names)
+
+
+def test_optional_sm8x_profiles_flashmask_sparse_backward_kernel():
+    torch = _require_sm8x_raw_op()
+
+    generator = torch.Generator(device="cuda").manual_seed(92)
+    q = torch.randn(1, 6, 2, 64, device="cuda", dtype=torch.float16, generator=generator)
+    k = torch.randn(1, 6, 2, 64, device="cuda", dtype=torch.float16, generator=generator)
+    v = torch.randn(1, 6, 2, 64, device="cuda", dtype=torch.float16, generator=generator)
+    dout = torch.randn_like(q)
+    mask = flashmask.compile_pe_state_causal_mask(
+        token_type_id=[[1, 2, 3, 3, 3, 3]],
+        time_index=[[-1, -1, 0, 0, 1, 2]],
+        valid_token=[[True, True, True, True, True, True]],
+        mask_heads=1,
+    )
+    startend = torch.as_tensor(mask.to_list(), device="cuda", dtype=torch.int32)
+    block_mask = torch.empty(0, device="cuda", dtype=torch.int32)
+    scale = 1.0 / math.sqrt(q.size(-1))
+    out, lse = torch.ops.flashmask.fwd(q, k, v, startend, block_mask, scale, mask.causal)
+
+    for _ in range(3):
+        torch.ops.flashmask.bwd(dout, q, k, v, out, lse, startend, block_mask, scale, mask.causal, False)
+    torch.cuda.synchronize()
+
+    with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ]
+    ) as profiler:
+        torch.ops.flashmask.bwd(dout, q, k, v, out, lse, startend, block_mask, scale, mask.causal, False)
+    torch.cuda.synchronize()
+
+    event_names = {event.key for event in profiler.key_averages()}
+    assert "flashmask::bwd" in event_names
+    assert any("flashmask_sm8x_backward" in name for name in event_names)
     assert not any("scaled_dot_product" in name for name in event_names)
     assert not any(name in {"aten::matmul", "aten::softmax"} for name in event_names)
 

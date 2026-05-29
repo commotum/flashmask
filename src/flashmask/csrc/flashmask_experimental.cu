@@ -1,5 +1,7 @@
 #include <torch/extension.h>
+#include <ATen/Dispatch.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cutlass/numeric_types.h>
 
@@ -192,6 +194,42 @@ void check_forward_inputs(
   }
 }
 
+void check_backward_inputs(
+    const at::Tensor& dout,
+    const at::Tensor& q,
+    const at::Tensor& k,
+    const at::Tensor& v,
+    const at::Tensor& out,
+    const at::Tensor& softmax_lse,
+    const at::Tensor& startend_row_indices,
+    const at::Tensor& block_mask,
+    bool causal,
+    bool deterministic) {
+  check_forward_inputs(q, k, v, startend_row_indices, block_mask, causal);
+  TORCH_CHECK(dout.is_cuda(), "dout must be a CUDA tensor");
+  TORCH_CHECK(out.is_cuda(), "out must be a CUDA tensor");
+  TORCH_CHECK(softmax_lse.is_cuda(), "softmax_lse must be a CUDA tensor");
+  TORCH_CHECK(dout.get_device() == q.get_device(), "dout must be on the same CUDA device as q");
+  TORCH_CHECK(out.get_device() == q.get_device(), "out must be on the same CUDA device as q");
+  TORCH_CHECK(softmax_lse.get_device() == q.get_device(), "softmax_lse must be on the same CUDA device as q");
+  TORCH_CHECK(dout.is_contiguous(), "dout must be contiguous [B, S_q, H, D_v]");
+  TORCH_CHECK(out.is_contiguous(), "out must be contiguous [B, S_q, H, D_v]");
+  TORCH_CHECK(softmax_lse.is_contiguous(), "softmax_lse must be contiguous [B, H, S_q]");
+  TORCH_CHECK(dout.scalar_type() == q.scalar_type(), "dout and q must have the same dtype");
+  TORCH_CHECK(out.scalar_type() == q.scalar_type(), "out and q must have the same dtype");
+  TORCH_CHECK(softmax_lse.scalar_type() == at::kFloat, "softmax_lse must be float32");
+  TORCH_CHECK(dout.sizes() == out.sizes(), "dout and out shapes must match");
+  TORCH_CHECK(out.size(0) == q.size(0), "out batch size must match q");
+  TORCH_CHECK(out.size(1) == q.size(1), "out sequence length must match q");
+  TORCH_CHECK(out.size(2) == q.size(2), "out head count must match q");
+  TORCH_CHECK(out.size(3) == v.size(3), "out value dimension must match v");
+  TORCH_CHECK(softmax_lse.dim() == 3, "softmax_lse must have shape [B, H, S_q]");
+  TORCH_CHECK(softmax_lse.size(0) == q.size(0), "softmax_lse batch size must match q");
+  TORCH_CHECK(softmax_lse.size(1) == q.size(2), "softmax_lse head count must match q");
+  TORCH_CHECK(softmax_lse.size(2) == q.size(1), "softmax_lse sequence length must match q");
+  TORCH_CHECK(!deterministic, "experimental FlashMask SM8x backward does not support deterministic mode yet");
+}
+
 void set_startend_ptrs(
     Flash_fwd_params& params,
     const at::Tensor& startend_row_indices,
@@ -320,6 +358,146 @@ void run_sm8x_mha_fwd(Flash_fwd_params& params, cudaStream_t stream, int arch) {
   }
   run_mha_fwd_<86, T, kHeadDim, kHeadDim, false, false, false, false>(params, stream);
 }
+
+__device__ bool sm8x_backward_pair_allowed(
+    const int32_t* __restrict__ startend,
+    int b,
+    int mask_h,
+    int q_idx,
+    int k_idx,
+    int mask_heads,
+    int seqlen_q,
+    int seqlen_k,
+    int bound_num,
+    bool causal) {
+  const int base = ((b * mask_heads + mask_h) * seqlen_k + k_idx) * bound_num;
+  const int b0 = startend[base + 0];
+
+  if (causal) {
+    const int causal_end = max(0, k_idx - (seqlen_k - seqlen_q));
+    if (q_idx < causal_end) {
+      return false;
+    }
+    if (bound_num == 1) {
+      return q_idx < b0;
+    }
+    const int b1 = startend[base + 1];
+    return !(q_idx >= b0 && q_idx < b1);
+  }
+
+  if (bound_num == 2) {
+    const int b1 = startend[base + 1];
+    return q_idx < b0 && q_idx >= b1;
+  }
+
+  const int b1 = startend[base + 1];
+  const int b2 = startend[base + 2];
+  const int b3 = startend[base + 3];
+  return !((q_idx >= b0 && q_idx < b1) || (q_idx >= b2 && q_idx < b3));
+}
+
+__device__ float block_sum(float value, float* scratch) {
+  const int tid = threadIdx.x;
+  scratch[tid] = value;
+  __syncthreads();
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (tid < stride) {
+      scratch[tid] += scratch[tid + stride];
+    }
+    __syncthreads();
+  }
+  return scratch[0];
+}
+
+template <typename scalar_t>
+__global__ void flashmask_sm8x_backward_pair_kernel(
+    const scalar_t* __restrict__ dout,
+    const scalar_t* __restrict__ q,
+    const scalar_t* __restrict__ k,
+    const scalar_t* __restrict__ v,
+    const scalar_t* __restrict__ out,
+    const float* __restrict__ softmax_lse,
+    const int32_t* __restrict__ startend,
+    float* __restrict__ dq,
+    float* __restrict__ dk,
+    float* __restrict__ dv,
+    int batch,
+    int seqlen_q,
+    int seqlen_k,
+    int heads,
+    int mask_heads,
+    int head_dim,
+    int value_dim,
+    int bound_num,
+    float softmax_scale,
+    bool causal) {
+  __shared__ float scratch[256];
+  __shared__ float p_shared;
+  __shared__ float ds_scaled_shared;
+
+  const int q_idx = blockIdx.x;
+  const int k_idx = blockIdx.y;
+  const int bh = blockIdx.z;
+  const int b = bh / heads;
+  const int head = bh - b * heads;
+  const int tid = threadIdx.x;
+  const int mask_h = head / (heads / mask_heads);
+
+  if (b >= batch ||
+      !sm8x_backward_pair_allowed(
+          startend,
+          b,
+          mask_h,
+          q_idx,
+          k_idx,
+          mask_heads,
+          seqlen_q,
+          seqlen_k,
+          bound_num,
+          causal)) {
+    return;
+  }
+
+  const int q_base = ((b * seqlen_q + q_idx) * heads + head) * head_dim;
+  const int k_base = ((b * seqlen_k + k_idx) * heads + head) * head_dim;
+  const int out_base = ((b * seqlen_q + q_idx) * heads + head) * value_dim;
+  const int v_base = ((b * seqlen_k + k_idx) * heads + head) * value_dim;
+  const int lse_idx = (b * heads + head) * seqlen_q + q_idx;
+
+  float qk = 0.0f;
+  for (int dim = tid; dim < head_dim; dim += blockDim.x) {
+    qk += static_cast<float>(q[q_base + dim]) * static_cast<float>(k[k_base + dim]);
+  }
+  const float score = block_sum(qk, scratch) * softmax_scale;
+
+  float dp = 0.0f;
+  float delta = 0.0f;
+  for (int dim = tid; dim < value_dim; dim += blockDim.x) {
+    const float d_out = static_cast<float>(dout[out_base + dim]);
+    dp += d_out * static_cast<float>(v[v_base + dim]);
+    delta += d_out * static_cast<float>(out[out_base + dim]);
+  }
+  dp = block_sum(dp, scratch);
+  delta = block_sum(delta, scratch);
+
+  if (tid == 0) {
+    const float lse = softmax_lse[lse_idx];
+    const float p = isfinite(lse) ? expf(score - lse) : 0.0f;
+    p_shared = p;
+    ds_scaled_shared = p * (dp - delta) * softmax_scale;
+  }
+  __syncthreads();
+
+  const float p = p_shared;
+  const float ds_scaled = ds_scaled_shared;
+  for (int dim = tid; dim < head_dim; dim += blockDim.x) {
+    atomicAdd(&dq[q_base + dim], ds_scaled * static_cast<float>(k[k_base + dim]));
+    atomicAdd(&dk[k_base + dim], ds_scaled * static_cast<float>(q[q_base + dim]));
+  }
+  for (int dim = tid; dim < value_dim; dim += blockDim.x) {
+    atomicAdd(&dv[v_base + dim], p * static_cast<float>(dout[out_base + dim]));
+  }
+}
 #endif
 
 }  // namespace
@@ -413,6 +591,73 @@ std::vector<at::Tensor> flashmask_bwd_cuda(
     double softmax_scale,
     bool causal,
     bool deterministic) {
+#ifdef FLASHMASK_SM8X_V2_BUILD
+  check_backward_inputs(
+      dout,
+      q,
+      k,
+      v,
+      out,
+      softmax_lse,
+      startend_row_indices,
+      block_mask,
+      causal,
+      deterministic);
+
+  const c10::cuda::CUDAGuard device_guard(q.device());
+  const CachedDeviceInfo device_info = query_device_info(q.get_device());
+  const int arch = device_info.arch;
+  TORCH_CHECK(
+      arch == 80 || arch == 86,
+      "experimental FlashMask SM8x V2 backward requires an SM80 or SM86 GPU");
+
+  at::Tensor dq_acc = at::zeros(q.sizes(), q.options().dtype(at::kFloat));
+  at::Tensor dk_acc = at::zeros(k.sizes(), k.options().dtype(at::kFloat));
+  at::Tensor dv_acc = at::zeros(v.sizes(), v.options().dtype(at::kFloat));
+
+  const float scale = std::isnan(softmax_scale)
+      ? static_cast<float>(1.0 / std::sqrt(static_cast<double>(q.size(3))))
+      : static_cast<float>(softmax_scale);
+
+  const dim3 grid(q.size(1), k.size(1), q.size(0) * q.size(2));
+  const dim3 block(256);
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream(q.get_device()).stream();
+
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::kHalf,
+      at::kBFloat16,
+      q.scalar_type(),
+      "flashmask_sm8x_backward",
+      [&] {
+        flashmask_sm8x_backward_pair_kernel<scalar_t><<<grid, block, 0, stream>>>(
+            dout.data_ptr<scalar_t>(),
+            q.data_ptr<scalar_t>(),
+            k.data_ptr<scalar_t>(),
+            v.data_ptr<scalar_t>(),
+            out.data_ptr<scalar_t>(),
+            softmax_lse.data_ptr<float>(),
+            startend_row_indices.data_ptr<int32_t>(),
+            dq_acc.data_ptr<float>(),
+            dk_acc.data_ptr<float>(),
+            dv_acc.data_ptr<float>(),
+            static_cast<int>(q.size(0)),
+            static_cast<int>(q.size(1)),
+            static_cast<int>(k.size(1)),
+            static_cast<int>(q.size(2)),
+            static_cast<int>(startend_row_indices.size(1)),
+            static_cast<int>(q.size(3)),
+            static_cast<int>(v.size(3)),
+            static_cast<int>(startend_row_indices.size(3)),
+            scale,
+            causal);
+      });
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {
+      dq_acc.to(q.scalar_type()),
+      dk_acc.to(k.scalar_type()),
+      dv_acc.to(v.scalar_type()),
+  };
+#else
   (void)dout;
   (void)q;
   (void)k;
@@ -425,4 +670,5 @@ std::vector<at::Tensor> flashmask_bwd_cuda(
   (void)causal;
   (void)deterministic;
   TORCH_CHECK(false, "FlashMask sparse FA3 backward kernel is not implemented");
+#endif
 }

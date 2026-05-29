@@ -15,12 +15,12 @@ flashmask::bwd(dout, q, k, v, out, softmax_lse, startend_row_indices,
   -> [dq, dk, dv]
 ```
 
-The current files register the final op names and provide a narrow experimental
-forward wrapper. Unsupported devices and unimplemented variants fail closed.
-The low-level `torch.ops.flashmask.*` entry points assume callers pass
-prevalidated mask metadata; use the Python `flashmask_attention` API for normal
-calls. Set `FLASHMASK_VALIDATE_RAW_OP=1` when running debug builds or direct-op
-tests that should synchronously check raw interval tensors before launch.
+The current files register the final op names and provide narrow experimental
+forward/backward wrappers for the verified SM86/SM8x path. Unsupported devices
+and unimplemented variants fail closed. The low-level `torch.ops.flashmask.*` entry points assume callers pass
+prevalidated mask metadata; use the Python `flashmask_attention` API for normal calls. Set
+`FLASHMASK_VALIDATE_RAW_OP=1` when running debug builds or direct-op tests that
+should synchronously check raw interval tensors before launch.
 
 `flashmask_v2/` contains the CUDA source snapshot being ported into this
 standalone extension. The SM90 / compute capability 9.0 path is a Hopper
@@ -40,3 +40,7 @@ and applies exact token-level interval masking for partial tiles. The older
 standalone `flashmask_sm8x_experimental.cu` kernel is retained as development
 reference only; the experimental SM8x build in `setup.py` uses
 `flashmask_experimental.cu` plus the vendored FlashMask v2 instantiations.
+The SM8x backward path saves `out` and `softmax_lse`, recomputes sparse
+probabilities from Q/K and interval metadata, and accumulates Q/K/V gradients in
+float before casting back to the input dtype. Deterministic backward and dropout
+remain unsupported.
