@@ -462,6 +462,26 @@ struct CollectiveMainloopFwdSm80 {
                 return false;
             }
         };
+        auto flashmask_tile_fully_unmasked = [&](int const candidate_n_block) {
+            if constexpr (Is_flashmask && !Is_causal && !Is_local && kStages == 1) {
+                if (params.lt_start_ptr == nullptr || params.ut_end_ptr == nullptr ||
+                    params.lt_end_ptr != nullptr || params.ut_start_ptr != nullptr ||
+                    params.lt_start_nblockmin == nullptr || params.ut_end_nblockmax == nullptr) {
+                    return false;
+                }
+                int const mask_h = bidh / params.h_h_flashmask_ratio;
+                int const nblock_seqlen = ((seqlen_k + kBlockN - 1) / kBlockN + 3) & 0xfffffffc;
+                int const mask_offset =
+                    (bidb * params.h_flashmask + mask_h) * nblock_seqlen + candidate_n_block;
+                int const m_block_s = m_block * kBlockM;
+                int const m_block_e = std::min(m_block_s + kBlockM, seqlen_q);
+                int const lt_start_min = params.lt_start_nblockmin[mask_offset];
+                int const ut_end_max = params.ut_end_nblockmax[mask_offset];
+                return (m_block_e <= lt_start_min) && (m_block_s >= ut_end_max);
+            } else {
+                return false;
+            }
+        };
         auto flashmask_previous_unmasked_n_block = [&](int candidate_n_block) {
             if constexpr (Is_flashmask && !Is_causal && !Is_local && kStages == 1) {
                 #pragma unroll 1
@@ -698,7 +718,9 @@ struct CollectiveMainloopFwdSm80 {
             if constexpr (kStages == 1) { sync(); load_K_next(); }
             mask_fn(tSrS, n_block);
             if constexpr (Is_flashmask) {
-                flashmask_apply_direct(tSrS, params, thread_idx, m_block, n_block, bidb, bidh, seqlen_k);
+                if (!flashmask_tile_fully_unmasked(n_block)) {
+                    flashmask_apply_direct(tSrS, params, thread_idx, m_block, n_block, bidb, bidh, seqlen_k);
+                }
             }
             Tensor scores_scale = softmax.template max_get_scale</*Is_first=*/Is_first_iter, Check_inf>(tSrS);
             softmax.template online_softmax</*Is_first=*/Is_first_iter, Check_inf>(tSrS);

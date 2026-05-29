@@ -32,6 +32,12 @@ SM80 runtime speed or correctness.
 Phase 6 completion evidence is recorded in
 `/home/jake/Developer/flashmask/goal/phase-6-completion-audit.md`.
 
+Current Phase 7 progress and rollout diagnostics are recorded in
+`/home/jake/Developer/flashmask/goal/phase-7-progress-audit.md`.
+
+Phase 7 completion evidence is recorded in
+`/home/jake/Developer/flashmask/goal/phase-7-completion-audit.md`.
+
 The current verified PE integration state is:
 
 ```text
@@ -49,6 +55,22 @@ Phase 7 should focus on reproducible speed/proof artifacts, not on rebuilding
 PE integration. Normal PE execution should keep using the public `flashmask`
 backend. Proof benchmarks may request explicit package backend
 `fa2-compatible` so the artifact is tied to the SM86 backend under test.
+
+Current SM86 evidence as of 2026-05-29:
+
+- full-sequence PE attention proof validates at roughly `2.5x` over dense
+  masked SDPA on the local A6000
+- representative cached rollout proof validates at roughly `1.9x` on the
+  default token-capped eval batch shape for 4096-token episodes (`B=32`,
+  `Q=128`, `K=3970`, `query_density=1.0`)
+- single-row rollout remains a useful diagnostic but is not the default PE
+  eval shape; it measures roughly `0.95x` versus dense masked SDPA
+- an all-open/no-preprocessing sentinel path was tested and removed because it
+  made the representative rollout shape slower
+
+The current SM86 attention proof set validates with separate full and rollout
+artifact records. Training speed is not claimed without a separate train-step
+proof.
 
 ## Non-Goals
 
@@ -70,6 +92,8 @@ Required benchmark families:
 - Rollout-shaped incremental attention:
   - one decoded state block as Q
   - accumulated special/state cache metadata as K/V
+  - K length is the actual incremental cache length through the decoded block,
+    not the padded maximum sequence capacity
   - measures cached rollout workload
 - Model-level PE parity:
   - logits and loss from the actual PE model
@@ -265,6 +289,8 @@ Benchmark cases should reflect real PE use:
 - PE special/domain/state token structure
 - padding where it appears in real batches
 - cached rollout with accumulated K/V metadata
+- no padded K tail in cached rollout benchmarks unless the real
+  `forward_incremental` path passes padded cache entries to attention
 - BF16 as the primary GPU dtype where PE uses BF16
 
 Avoid proving speed on shapes PE does not actually use.
@@ -316,7 +342,9 @@ Example SM86 proof:
 
 ```bash
 PE_REQUIRE_FLASHMASK_SM8X=1 PYTHONPATH=/home/jake/Developer/flashmask/src uv run --extra gpu pytest -q tests/test_train.py tests/test_flashmask_sm8x_gpu_parity.py
-uv run --extra gpu python benchmarks/bench_flashmask_attention.py --backend fa2-compatible --require-sm86 --cases full,rollout --dtypes bf16 --batch-sizes 1 --seq-lens 4096 --heads 4 --head-dim 128 --warmup 20 --iters 100 --min-speedup 1.5 --jsonl --output-jsonl artifacts/pe-flashmask-sm86.jsonl
+uv run --extra gpu python benchmarks/bench_flashmask_attention.py --backend fa2-compatible --require-sm86 --cases full --dtypes bf16 --batch-sizes 1 --seq-lens 4096 --heads 4 --head-dim 128 --warmup 20 --iters 100 --min-speedup 1.5 --jsonl --output-jsonl artifacts/pe-flashmask-sm86-full.jsonl
+uv run --extra gpu python benchmarks/bench_flashmask_attention.py --backend fa2-compatible --require-sm86 --cases rollout --dtypes bf16 --batch-sizes 32 --seq-lens 4096 --heads 4 --head-dim 128 --warmup 20 --iters 100 --min-speedup 1.5 --jsonl --output-jsonl artifacts/pe-flashmask-sm86-rollout.jsonl
+cat artifacts/pe-flashmask-sm86-full.jsonl artifacts/pe-flashmask-sm86-rollout.jsonl > artifacts/pe-flashmask-sm86.jsonl
 uv run --extra gpu flashmask-validate-proof --backend fa2-compatible --min-speedup 1.5 --require-case full --require-case rollout artifacts/pe-flashmask-sm86.jsonl
 ```
 

@@ -243,6 +243,14 @@ def _validate_record(
         raise ProofValidationError(f"{prefix}: status is not ok")
     if record.get("passed") is not True:
         raise ProofValidationError(f"{prefix}: passed is not true")
+    for flag in (
+        "correctness_passed",
+        "profiler_passed",
+        "speedup_passed",
+        "speed_proof_passed",
+    ):
+        if record.get(flag) is not True:
+            raise ProofValidationError(f"{prefix}: {flag} is not true")
     expected_capability = spec["capability"]
     if record.get("capability") != expected_capability:
         raise ProofValidationError(f"{prefix}: capability is not {expected_capability}")
@@ -273,7 +281,11 @@ def _validate_record(
         raise ProofValidationError(f"{prefix}: kernel_ready is not true")
     if record.get("forward_ready") is not True:
         raise ProofValidationError(f"{prefix}: forward_ready is not true")
-    if record.get("profiler_check_skipped") is True:
+    if "backward_ready" not in record:
+        raise ProofValidationError(f"{prefix}: backward_ready is missing")
+    if not isinstance(record.get("backward_ready"), bool):
+        raise ProofValidationError(f"{prefix}: backward_ready is not boolean")
+    if record.get("profiler_check_skipped") is not False:
         raise ProofValidationError(f"{prefix}: profiler check was skipped")
     if record.get("profiler_flashmask_fwd") is not True:
         raise ProofValidationError(f"{prefix}: flashmask::fwd was not profiled")
@@ -301,12 +313,22 @@ def _validate_record(
             raise ProofValidationError(f"{prefix}: missing CUDA kernel event marker {marker}")
 
     speedup = record.get("speedup")
-    if speedup is not None:
-        numeric_speedup = _finite_float(prefix, "speedup", speedup)
-        if numeric_speedup < min_speedup:
-            raise ProofValidationError(
-                f"{prefix}: speedup {numeric_speedup:.4f} is below required {min_speedup:.4f}"
-            )
+    if speedup is None:
+        raise ProofValidationError(f"{prefix}: speedup is missing")
+    numeric_speedup = _finite_float(prefix, "speedup", speedup)
+    if numeric_speedup < min_speedup:
+        raise ProofValidationError(
+            f"{prefix}: speedup {numeric_speedup:.4f} is below required {min_speedup:.4f}"
+        )
+    record_min_speedup = _finite_float(prefix, "min_speedup", record.get("min_speedup"))
+    if record_min_speedup < min_speedup:
+        raise ProofValidationError(
+            f"{prefix}: min_speedup {record_min_speedup:.4f} is below required {min_speedup:.4f}"
+        )
+    for metric in ("dense_sdpa_ms", "flashmask_ms"):
+        value = _finite_float(prefix, metric, record.get(metric))
+        if value <= 0:
+            raise ProofValidationError(f"{prefix}: {metric} must be positive")
     _validate_parity_tolerances(prefix, record)
     for metric in (
         "max_abs_error",
