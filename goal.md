@@ -23,15 +23,29 @@ beyond a minimal fail-closed adapter.
 PE should be used as the downstream correctness, training, and benchmark
 harness only after the standalone kernel path is real.
 
+## Current Hardware Strategy
+
+The current local development GPU is an NVIDIA RTX A6000 with compute
+capability 8.6. Current completion criteria should therefore be strict for the
+SM86/SM8x backend and should not require access to SM90/Hopper hardware.
+
+SM90/Hopper work should still be laid out deliberately: keep source templates,
+build modes, backend metadata, router branches, fail-closed validation, and
+hard-gated H100/H200 proof commands in place. Runtime parity, profiler evidence,
+and benchmark proof for SM90 are deferred until Hopper hardware is available.
+Do not claim SM90 support until those deferred proof commands pass on Hopper.
+
 ## Backend Router
 
 `flashmask` must expose one stable Python attention API and route internally to
 the best available sparse backend:
 
-- SM90 / compute capability 9.0: use the FlashAttention 3-compatible FlashMask
-  path.
-- SM80/SM86-class GPUs: use an exact FA2-compatible or custom sparse interval
-  path that preserves the same mask semantics.
+- SM80/SM86-class GPUs: current strict implementation and proof target. Use an
+  exact FA2-compatible or custom sparse interval path that preserves the same
+  mask semantics.
+- SM90 / compute capability 9.0: maintain a FlashAttention 3-compatible
+  template path with build, metadata, router, and fail-closed hooks. Runtime
+  validation is deferred until H100/H200 access is available.
 - Unsupported or unbuilt backends must fail closed with an actionable error;
   they must not silently fall back to dense SDPA masking.
 - Routing decisions must be observable in tests and benchmark artifacts.
@@ -57,8 +71,10 @@ The mask representation must also support the structured interval-style masks re
 - Tests cover the primary PE next-state mask and the structured mask families in `context/masks.py`.
 - The fast path calls a kernel-native sparse attention implementation rather than dense SDPA with an attention mask.
 - Forward and backward are implemented for the sparse kernel path used by PE training.
-- SM90 validation verifies the FlashAttention 3-compatible sparse path.
 - SM80/SM86 validation verifies an exact sparse interval kernel path that preserves PE semantics; stock FA2 causal/window/padding masks are not sufficient.
+- SM90/Hopper artifacts provide a buildable, fail-closed FA3-compatible
+  template path and hard-gated proof commands. SM90 runtime validation is a
+  deferred hardware pass, not a blocker for current completion on SM86.
 - The backend router selects the correct sparse implementation for the active GPU/build and fails closed when no correct sparse backend is available.
 - GPU integration tests run from the PE repo and verify FlashMask produces scores/logits/losses identical to the dense implementation within tolerance.
 - GPU integration tests verify the FlashMask path actually uses the intended kernel backend for the active GPU architecture.

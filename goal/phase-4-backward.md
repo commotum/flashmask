@@ -2,18 +2,27 @@
 
 ## Pasteable Goal
 
-Implement FlashMask sparse backward and PyTorch autograd integration so PE can
-train with FlashMask only when the selected backend has verified Q/K/V gradient
-parity. See `/home/jake/Developer/flashmask/goal/phase-4-backward.md` for the
-detailed scope, tests, and exit criteria.
+Implement FlashMask sparse backward and PyTorch autograd integration for the
+current SM86/SM8x backend so PE can train with FlashMask only when that backend
+has verified Q/K/V gradient parity. Keep SM90/Hopper backward as a templated,
+fail-closed path with hard-gated H100/H200 validation commands. See
+`/home/jake/Developer/flashmask/goal/phase-4-backward.md` for the detailed
+scope, tests, and exit criteria.
 
 ## Objective
 
-Implement backward for the sparse kernel path so PE can train with FlashMask.
+Implement backward for the current SM86/SM8x sparse kernel path so PE can train
+with FlashMask on the available local backend.
 
 This phase makes the forward kernels from Phase 3 usable for training. The
 backward path must preserve the same interval-mask semantics and must not route
 through dense masked attention as a hidden fallback.
+
+SM90/Hopper backward work in this phase is a template/scaffold only: keep the
+source references, build hooks, metadata fields, fail-closed architecture gates,
+and hard-gated validation commands ready for later H100/H200 access. SM90
+runtime gradient parity and profiler proof are deferred and are not current
+Phase 4 exit criteria.
 
 ## Non-Goals
 
@@ -135,20 +144,23 @@ port already proves it.
 
 ## Backend-Specific Requirements
 
-### SM90 / FA3-Compatible
+### SM90 / FA3-Compatible Template
 
-The SM90 backward path must:
+The SM90 backward path should be laid out as a Hopper validation template, not a
+current completion blocker. It should:
 
 - validate compute capability 9.0
-- use the FA3-compatible sparse backward kernel path
-- preserve `startend` interval semantics
-- match dense reference gradients
-- expose profiler-visible backward kernel markers
-- set `backward_ready=True` only after tests pass
+- keep the FA3-compatible sparse backward source/wrapper structure visible
+- preserve the Phase 2 raw-op ABI and `startend` interval metadata contract
+- expose backend metadata for `sm90_sparse_fa3`
+- fail closed on non-Hopper devices or unproven Hopper builds
+- document hard-gated H100/H200 commands for later gradient and profiler proof
+- keep `backward_ready=False` until those deferred Hopper tests pass
 
 ### SM80/SM86 Sparse Path
 
-The SM80/SM86 backward path must:
+The SM80/SM86 backward path is the strict Phase 4 implementation target. It
+must:
 
 - validate supported compute capability, with SM86 as the first local target
 - use an exact sparse interval backward path
@@ -157,8 +169,8 @@ The SM80/SM86 backward path must:
 - expose profiler-visible backward kernel markers
 - fail closed if only forward is available
 
-If SM80/SM86 backward lags SM90, backend routing must report that honestly and
-PE training must reject that backend until it is ready.
+If any backend remains forward-only, backend routing must report that honestly
+and PE training must reject that backend until it is ready.
 
 ## C++/CUDA Extension Work
 
@@ -187,8 +199,9 @@ Required cases:
 - multiple heads
 - FP16 and BF16
 - representative sequence lengths
-- SM90 backend when available
-- SM80/SM86 backend when available
+- SM80/SM86 backend on the local GPU
+- SM90/Hopper only as hard-gated deferred tests or template checks; SM90 runtime
+  gradient parity is not a current Phase 4 exit criterion
 
 Representative checks:
 
@@ -268,8 +281,14 @@ uv run pytest -q
 Optional GPU tests should be hard-gated by backend/build, for example:
 
 ```bash
-FLASHMASK_REQUIRE_SM90=1 uv run pytest -q tests/test_cuda_extension_optional.py
 FLASHMASK_REQUIRE_SM8X=1 uv run pytest -q tests/test_cuda_extension_optional.py
+```
+
+Deferred Hopper validation command, recorded now but not required until
+H100/H200 hardware is available:
+
+```bash
+FLASHMASK_REQUIRE_SM90=1 uv run pytest -q tests/test_cuda_extension_optional.py
 ```
 
 PE integration tests after backend readiness:
@@ -283,11 +302,14 @@ training readiness.
 
 ## Exit Criteria
 
-- Q/K/V gradients match dense reference within agreed tolerance.
-- SM90 backend reports `backward_ready=True` only after gradient tests pass.
+- SM80/SM86 Q/K/V gradients match dense reference within agreed tolerance on
+  the local supported backend.
 - SM80/SM86 backend reports `backward_ready=True` only after gradient tests
   pass.
-- Backward profiler evidence proves sparse kernels ran.
+- SM90/Hopper backward remains templated and fail-closed unless separate
+  H100/H200 gradient and profiler proof has passed; that proof is deferred and
+  not required for current Phase 4 completion.
+- SM80/SM86 backward profiler evidence proves sparse kernels ran.
 - PE training no longer rejects FlashMask backends whose backward is ready.
 - A tiny PE training step runs with finite loss and gradients.
 - Inference-only backends still fail closed for training.

@@ -2,21 +2,27 @@
 
 ## Pasteable Goal
 
-Produce reproducible PE benchmark and proof artifacts showing the standalone
-FlashMask sparse kernels are correct, profiler-verified, and materially faster
-than PE's dense SDPA mask path on representative full and rollout-shaped
-workloads. See
+Produce reproducible PE benchmark and proof artifacts for the current
+SM86/SM8x FlashMask sparse kernels showing they are correct,
+profiler-verified, and materially faster than PE's dense SDPA mask path on
+representative full and rollout-shaped workloads. Keep SM90/Hopper proof
+schemas and commands as deferred templates for later H100/H200 validation. See
 `/home/jake/Developer/flashmask/goal/phase-7-benchmarks-and-proof.md` for the
 detailed scope, tests, and exit criteria.
 
 ## Objective
 
-Prove the standalone sparse kernel is materially faster than dense SDPA masking
-on representative PE workloads.
+Prove the standalone SM86/SM8x sparse kernel is materially faster than dense
+SDPA masking on representative PE workloads.
 
 This phase is proof, not development scaffolding. It should run only after the
 standalone forward/backward kernels, backend router, and PE integration are real
 enough that benchmark results mean something.
+
+The current proof target is the local SM86/SM8x backend. SM90/Hopper proof is
+deferred until H100/H200 hardware is available; this phase should leave the
+SM90 JSONL schema fields, validators, artifact locations, and commands ready,
+but those records are not required for current completion.
 
 ## Non-Goals
 
@@ -189,9 +195,9 @@ Validators should reject records when:
 
 Validators should support backend-specific proof targets:
 
-- SM90 FA3-compatible proof
 - SM80/SM86 exact sparse interval proof
-- optional combined proof that requires both artifact sets
+- SM90 FA3-compatible proof as a deferred Hopper target
+- optional combined proof after both SM8x and Hopper artifact sets exist
 
 ## Speedup Gates
 
@@ -248,23 +254,26 @@ Commands should be runnable with `uv` from the PE repo.
 Recommended artifact paths:
 
 ```text
-/home/jake/Developer/pe/artifacts/pe-flashmask-sm90.jsonl
 /home/jake/Developer/pe/artifacts/pe-flashmask-sm86.jsonl
-/home/jake/Developer/pe/artifacts/pe-flashmask-sm90-train.jsonl
 /home/jake/Developer/pe/artifacts/pe-flashmask-sm86-train.jsonl
+/home/jake/Developer/pe/artifacts/pe-flashmask-sm90.jsonl        # deferred
+/home/jake/Developer/pe/artifacts/pe-flashmask-sm90-train.jsonl  # deferred
 ```
 
 The exact filenames can change, but they should encode backend and workload.
 
 ## Test Commands
 
-Example SM90 proof:
+Deferred SM90/Hopper proof template:
 
 ```bash
 PE_REQUIRE_FLASHMASK_SM90=1 PYTHONPATH=/home/jake/Developer/flashmask/src uv run --extra gpu pytest -q tests/test_flashmask_gpu_parity.py
 uv run --extra gpu python benchmarks/bench_flashmask_attention.py --backend fa3 --require-sm90 --cases full,rollout --dtypes bf16 --batch-sizes 1,4 --seq-lens 512,2048 --heads 4 --head-dim 128 --warmup 20 --iters 100 --min-speedup 1.15 --jsonl --output-jsonl artifacts/pe-flashmask-sm90.jsonl
 uv run --extra gpu flashmask-validate-proof --backend fa3 --min-speedup 1.15 --require-case full --require-case rollout artifacts/pe-flashmask-sm90.jsonl
 ```
+
+This command is not a current Phase 7 exit criterion unless it is run on
+H100/H200 hardware after the SM90 backend has been separately proven ready.
 
 Example SM86 proof:
 
@@ -285,9 +294,12 @@ documented and reproducible.
 
 ## Exit Criteria
 
-- SM90 proof validates the FA3-compatible sparse backend.
 - SM80/SM86 proof validates the exact sparse interval backend.
-- Required proof artifacts include full and rollout-shaped PE workloads.
+- SM90/Hopper proof templates, validator target, and artifact paths are
+  documented, but SM90 runtime proof is deferred until H100/H200 hardware is
+  available.
+- Required SM86/SM8x proof artifacts include full and rollout-shaped PE
+  workloads.
 - Training proof exists before claiming train speedup.
 - Validators reject skipped profiler checks, missing kernel markers, dense
   fallback events, failed correctness, and missing required cases.

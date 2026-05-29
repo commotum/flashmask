@@ -5,6 +5,11 @@ Date: 2026-05-29
 Goal reference:
 `/home/jake/Developer/flashmask/goal/phase-3-port-forward-kernels.md`.
 
+Hardware policy update:
+current completion is strict for the local SM86/SM8x backend. SM90/Hopper work
+is treated as a buildable/fail-closed template with hard-gated H100/H200
+validation commands, not as a current runtime proof requirement.
+
 ## Proven Locally
 
 - Phase 2 ABI is preserved.

@@ -3,20 +3,27 @@
 ## Pasteable Goal
 
 Expose one public FlashMask attention API with an internal backend router that
-selects SM90 FA3-compatible or SM80/SM86 exact sparse interval kernels based on
-the active GPU/build, failing closed when unsupported. See
+selects the current SM80/SM86 exact sparse interval backend on supported local
+hardware, while keeping SM90 FA3-compatible routing as a templated,
+fail-closed Hopper path. See
 `/home/jake/Developer/flashmask/goal/phase-5-backend-router.md` for the
 detailed scope, tests, and exit criteria.
 
 ## Objective
 
 Expose one stable public attention API that selects the correct sparse backend
-for the active GPU and build.
+for the active GPU and build, with SM86/SM8x as the strict current runtime
+target.
 
 The router should make FlashMask easy to consume from PE: PE should ask for
 FlashMask once, and the package should choose the correct kernel-native sparse
 implementation for the current machine. Unsupported combinations must fail
 closed.
+
+SM90/Hopper routing should be present as a template path: aliases, backend
+metadata, architecture checks, and hard-gated H100/H200 validation commands
+should exist, but real SM90 runtime routing is not a current completion
+criterion until Hopper hardware is available.
 
 ## Non-Goals
 
@@ -72,12 +79,13 @@ The public API should distinguish:
 
 For `backend="auto"`:
 
-- SM90 / compute capability 9.0:
-  - route to `sm90_sparse_fa3` if compiled and forward-ready
-  - fail closed if the SM90 backend is not compiled or not ready
 - SM80/SM86:
   - route to `sm8x_sparse_fa2_compatible` if compiled and forward-ready
   - fail closed if the SM80/SM86 backend is not compiled or not ready
+- SM90 / compute capability 9.0:
+  - keep the route to `sm90_sparse_fa3` defined for later Hopper validation
+  - fail closed if the SM90 backend is not compiled, not ready, or not
+    separately proven on Hopper hardware
 - unsupported GPU:
   - fail closed with an actionable message
 - CPU tensors:
@@ -85,7 +93,8 @@ For `backend="auto"`:
 
 For explicit backend requests:
 
-- `fa3`/`sm90-fa3` requires SM90 and the FA3-compatible sparse backend.
+- `fa3`/`sm90-fa3` requires SM90, the FA3-compatible sparse backend, and
+  deferred Hopper proof before it may be treated as runtime-ready.
 - `fa2-compatible`/`sm8x-fa2-compatible` requires a supported SM80/SM86-class
   GPU and the exact sparse interval backend.
 - architecture mismatch must fail clearly.
@@ -225,8 +234,9 @@ PE may:
 
 Required tests:
 
-- `auto` selects SM90 backend on mocked SM90 capability.
 - `auto` selects SM80/SM86 backend on mocked SM86 capability.
+- SM90 alias/routing metadata is present and can be tested with mocks, but
+  real SM90 runtime routing is deferred until Hopper validation.
 - unsupported capability fails clearly.
 - explicit `fa3` on SM86 fails clearly.
 - explicit `fa2-compatible` on SM90 fails clearly unless explicitly supported.
@@ -240,9 +250,10 @@ Required tests:
 
 Optional GPU tests:
 
-- real SM90 routing uses the FA3-compatible kernel.
 - real SM86 routing uses the exact sparse interval kernel.
 - profiler evidence matches selected backend.
+- deferred SM90/Hopper routing proof uses the FA3-compatible kernel when
+  `FLASHMASK_REQUIRE_SM90=1` is run on H100/H200 hardware.
 
 ## Test Commands
 
@@ -255,8 +266,13 @@ uv run pytest -q
 Optional GPU router tests:
 
 ```bash
-FLASHMASK_REQUIRE_SM90=1 uv run pytest -q tests/test_cuda_extension_optional.py
 FLASHMASK_REQUIRE_SM8X=1 uv run pytest -q tests/test_cuda_extension_optional.py
+```
+
+Deferred Hopper router proof:
+
+```bash
+FLASHMASK_REQUIRE_SM90=1 uv run pytest -q tests/test_cuda_extension_optional.py
 ```
 
 PE-side routing tests after integration:
@@ -267,11 +283,14 @@ PYTHONPATH=/home/jake/Developer/flashmask/src uv run --extra gpu pytest -q tests
 
 ## Exit Criteria
 
-- Tests prove backend selection for supported architectures.
+- Tests prove backend selection for the current supported SM80/SM86-class
+  architecture.
 - Tests prove explicit backend mismatch fails clearly.
 - Tests prove missing forward/backward readiness fails closed.
 - Tests prove no dense fallback is reachable through FlashMask backends.
 - PE can call one FlashMask API without architecture-specific branching.
 - Benchmark artifacts record requested backend, selected backend, and backend
   kind.
+- SM90/Hopper routing remains a documented, fail-closed template path until
+  separate H100/H200 runtime proof exists.
 - The router is ready for PE integration and Phase 7 proof artifacts.

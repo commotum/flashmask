@@ -19,9 +19,9 @@ This phase turns the Phase 2 ABI into real sparse attention execution on the
 available SM86/SM8x target. The central runtime requirement for the local phase
 is that disallowed Q/K interactions are handled by the sparse kernel path, not
 by dense SDPA masking. SM90/Hopper runtime parity, profiler, and speed proof are
-deferred until Hopper hardware is available, but the SM90 implementation must
-remain wired, buildable, fail-closed on non-Hopper devices, and covered by a
-reproducible hard-gated test command.
+deferred until Hopper hardware is available, but the SM90 template path must
+remain wired, buildable where practical, fail-closed on non-Hopper devices, and
+covered by a reproducible hard-gated test command.
 
 No current Phase 3 exit criterion may depend on executing code on an SM90/Hopper
 GPU. Hopper access is a later validation pass, not a blocker for completing the
@@ -137,9 +137,10 @@ The output should let the main attention kernel classify each Q/K tile as:
 - fully visible: run attention without token-mask application
 - partially masked: compute tile and apply token-level interval mask
 
-## SM90 / FA3-Compatible Path
+## SM90 / FA3-Compatible Template Path
 
-The SM90 path should port the FlashMask v2/FA3-compatible implementation.
+The SM90 path should lay out the FlashMask v2/FA3-compatible implementation as
+a Hopper template path. It is not a current runtime proof target.
 
 Current Phase 3 requirements that do not require Hopper hardware:
 

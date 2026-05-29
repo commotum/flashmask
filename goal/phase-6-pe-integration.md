@@ -4,7 +4,9 @@
 
 Integrate PE as a thin downstream consumer of the standalone FlashMask package,
 preserving PE's dense state-autoregressive semantics while routing FlashMask
-attention through interval metadata and the public FlashMask API. See
+attention through interval metadata and the public FlashMask API. The current
+strict GPU integration target is SM86/SM8x; SM90/Hopper integration remains a
+templated, hard-gated validation path until H100/H200 access is available. See
 `/home/jake/Developer/flashmask/goal/phase-6-pe-integration.md` for the
 detailed scope, tests, and exit criteria.
 
@@ -15,6 +17,10 @@ Keep PE as a thin downstream consumer of the standalone FlashMask package.
 This phase connects the completed standalone FlashMask API to PE without moving
 experiment policy, tokenization, batching, model logic, training, or evaluation
 out of PE.
+
+PE integration proof should be strict for the available SM86/SM8x backend. PE
+should expose SM90/Hopper aliases and artifact fields only as a fail-closed
+template path until the standalone FlashMask SM90 proof has passed on Hopper.
 
 ## Non-Goals
 
@@ -219,6 +225,10 @@ PE tests should cover:
 GPU tests should be hard-gated and architecture-specific. They should fail loud
 when explicitly required.
 
+SM86/SM8x GPU tests are the current Phase 6 runtime proof target. SM90/Hopper
+GPU tests should be documented and hard-gated, but they are deferred and are not
+required for current Phase 6 completion without H100/H200 hardware.
+
 ## Benchmark Readiness
 
 This phase should not prove final speedup. It should only make PE capable of
@@ -259,8 +269,13 @@ PYTHONPATH=/home/jake/Developer/flashmask/src uv run pytest -q tests/test_attent
 GPU PE parity tests, hard-gated by backend:
 
 ```bash
-PE_REQUIRE_FLASHMASK_SM90=1 PYTHONPATH=/home/jake/Developer/flashmask/src uv run --extra gpu pytest -q tests/test_flashmask_gpu_parity.py
 PE_REQUIRE_FLASHMASK_SM8X=1 PYTHONPATH=/home/jake/Developer/flashmask/src uv run --extra gpu pytest -q tests/test_flashmask_sm8x_gpu_parity.py
+```
+
+Deferred Hopper PE parity command:
+
+```bash
+PE_REQUIRE_FLASHMASK_SM90=1 PYTHONPATH=/home/jake/Developer/flashmask/src uv run --extra gpu pytest -q tests/test_flashmask_gpu_parity.py
 ```
 
 The exact test filenames may change, but the commands must prove PE calls the
@@ -277,5 +292,8 @@ standalone FlashMask package and not framework reference code.
 - PE tests verify the FlashMask path receives interval metadata, not dense masks.
 - PE tests verify FlashMask backends do not fall back to dense SDPA.
 - Training uses FlashMask only when the selected backend has backward support.
+- SM86/SM8x PE GPU parity is the current strict GPU integration target.
+- SM90/Hopper PE GPU parity remains documented and fail-closed until deferred
+  Hopper validation is run.
 - PE remains a thin consumer; FlashMask remains the owner of sparse masks and
   kernel-native attention.

@@ -17,6 +17,13 @@ This phase is intentionally front-loaded. The kernel port should not proceed
 until the project has a precise, tested definition of what mask metadata means
 and which current worktree changes are useful.
 
+## Hardware Planning Note
+
+The mask specification is hardware-neutral. Later phases should use the local
+SM86/SM8x GPU path as the strict implementation and proof target, while keeping
+SM90/Hopper work as a templated, fail-closed path with hard-gated H100/H200
+validation commands until Hopper hardware is available.
+
 ## Non-Goals
 
 - Do not optimize kernels in this phase.

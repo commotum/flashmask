@@ -4,7 +4,9 @@
 
 Harden FlashMask into a usable standalone dependency with clear docs, packaging,
 build modes, dependency audits, hard-gated GPU tests, actionable errors, and PE
-readiness checks. See
+readiness checks. The hardened current target is SM86/SM8x; SM90/Hopper should
+remain documented as a templated, fail-closed path until H100/H200 proof exists.
+See
 `/home/jake/Developer/flashmask/goal/phase-8-hardening.md` for the detailed
 scope, tests, and exit criteria.
 
@@ -14,6 +16,10 @@ Make the package usable, maintainable, and auditable as a standalone dependency.
 
 This phase turns the working implementation into something PE can depend on
 without special knowledge of the porting process.
+
+Hardening should not require Hopper hardware for current completion. It should
+make the SM86/SM8x path production-usable and make the SM90/Hopper path obvious,
+documented, and fail-closed until later runtime proof is recorded.
 
 ## Non-Goals
 
@@ -76,8 +82,9 @@ Document and test supported build modes:
 
 - pure Python, no extension
 - stub extension
-- SM90 FA3-compatible extension
-- SM80/SM86 sparse interval extension
+- SM80/SM86 sparse interval extension, the current strict runtime target
+- SM90 FA3-compatible template extension, including build flags, metadata,
+  architecture checks, and deferred proof commands
 
 Each build mode should say:
 
@@ -123,8 +130,8 @@ CPU-safe tests:
 
 Optional GPU tests:
 
-- SM90 forward/backward/parity/profiler
 - SM80/SM86 forward/backward/parity/profiler
+- SM90 forward/backward/parity/profiler as deferred hard-gated Hopper tests
 - raw op smoke tests
 - PE integration parity
 - proof validator on generated artifacts
@@ -179,8 +186,8 @@ be required for ordinary CPU-side development.
 If CI is added later, split jobs by capability:
 
 - CPU/package job
-- SM90 GPU job
 - SM80/SM86 GPU job
+- SM90 GPU job, deferred unless Hopper CI/hardware is available
 - PE integration job
 
 ## Artifact Hygiene
@@ -231,8 +238,10 @@ Before considering the package ready for regular use:
 - package build passes
 - dependency audit passes
 - docs cover install/build/use/failure modes
-- SM90 proof passes on SM90 hardware
 - SM80/SM86 proof passes on supported hardware
+- SM90 proof passes on SM90 hardware before claiming Hopper support, but this
+  is a deferred validation item rather than a blocker for current SM86
+  hardening
 - PE parity passes
 - PE benchmark proof passes
 - backward/training readiness is accurately reported
@@ -251,6 +260,8 @@ clearly.
 - Runtime import audit proves there is no Paddle/PaddleNLP dependency.
 - Docs explain the boundary between `flashmask`, `pe`, and `ankos`.
 - Docs explain build modes, backend routing, and common failures.
+- Docs clearly mark SM86/SM8x as the current strict runtime target and
+  SM90/Hopper as deferred until hard-gated H100/H200 proof exists.
 - PE can consume the package without architecture-specific implementation
   knowledge.
 - Generated artifacts are ignored or intentionally documented.

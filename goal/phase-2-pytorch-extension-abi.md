@@ -14,11 +14,22 @@ detailed scope, tests, and exit criteria.
 Lock down and test the standalone PyTorch extension surface before treating any
 kernel path as stable.
 
-This phase should produce a stable ABI that the SM90 and SM86 kernel ports
-can target. Experimental kernel code may already exist in the tree; Phase 2 is
+This phase should produce a stable ABI that the SM86/SM8x implementation and
+the SM90/Hopper template path can target. Experimental kernel code may already
+exist in the tree; Phase 2 is
 where the public Python API, raw torch op signatures, backend metadata, build
 modes, and fail-closed behavior become the contract that later phases must not
 casually redesign.
+
+## Current Hardware Policy
+
+The local strict implementation target for later phases is SM86/SM8x, matching
+the available RTX A6000-class compute capability 8.6 GPU. Phase 2 should still
+reserve ABI and metadata room for SM90/Hopper, but SM90 runtime validation is
+not a current completion requirement. The SM90 surface is a template contract:
+build mode, backend kind, architecture checks, and hard-gated proof commands
+must exist, while runtime correctness and profiler proof wait for H100/H200
+hardware.
 
 ## Non-Goals
 
@@ -201,9 +212,11 @@ Support explicit build modes:
 
 - no CUDA extension: pure Python package imports and mask tests run
 - stub extension: registers ops and fails closed
-- SM90 extension: builds FA3-compatible sparse path
-- SM86/SM8x extension: builds exact sparse interval path for the supported
-  compute capabilities
+- SM86/SM8x extension: builds the exact sparse interval path for the supported
+  compute capabilities and is the current strict runtime target
+- SM90 extension: builds or templates the FA3-compatible sparse path, reports
+  `sm90_sparse_fa3`, validates compute capability 9.0, and fails closed until
+  Hopper runtime proof exists
 
 Build flags should be clear and mutually exclusive where needed. Example names
 are acceptable if already present in the codebase:
